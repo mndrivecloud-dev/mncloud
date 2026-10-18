@@ -123,7 +123,7 @@ app.post('/api/auth/sign-in', async (req, res) => {
     }
 });
 
-// 3. Rota de Upload de Ficheiros com Reutilização Estável de Sessão
+// 3. Rota de Upload de Ficheiros com suporte a arquivos grandes em memória
 app.post('/api/upload', upload.single('file'), async (req, res) => {
     try {
         console.log("Recebendo requisição de upload...");
@@ -136,7 +136,6 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
         console.log(`Arquivo recebido: ${file.originalname} (${file.size} bytes)`);
 
-        // REUTILIZA O CLIENTE JÁ CONECTADO NA MEMÓRIA
         let client = activeSessions[phone];
         
         if (!client) {
@@ -144,13 +143,12 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             const stringSession = new StringSession(sessionString || '');
             client = new TelegramClient(stringSession, Number(apiId), apiHash, { 
                 connectionRetries: 5,
-                useWSS: false // Garante estabilidade TCP full no Railway
+                useWSS: false
             });
             await client.connect();
             activeSessions[phone] = client;
         } else {
             console.log("Utilizando cliente Telegram já ativo na memória.");
-            // Garante que está conectado sem recriar a chave
             if (!client.connected) {
                 await client.connect();
             }
@@ -158,12 +156,16 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
         console.log("Enviando arquivo para o Telegram...");
 
+        // FORMA COMPATÍVEL COM BUFFERS GRANDES DO MULTER NO GRAMJS:
+        // Passamos o CustomFile com file.buffer explicitamente nos parâmetros
         const customFile = new CustomFile(
             file.originalname,
             file.size,
-            undefined,
+            file.originalname, // nome como 3º argumento previne a busca no sistema de arquivos
             file.buffer
         );
+        // Garante que a propriedade interna buffer seja preservada
+        customFile.buffer = file.buffer;
 
         const uploadResult = await client.uploadFile({
             file: customFile,
@@ -196,7 +198,6 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     } catch (err) {
         console.error('ERRO DETALHADO NO UPLOAD:', err);
         
-        // Se der erro de chave não registrada, limpa a sessão da memória para forçar renovação no próximo login
         if (err.errorMessage === 'AUTH_KEY_UNREGISTERED' && req.body.phone) {
             delete activeSessions[req.body.phone];
         }
