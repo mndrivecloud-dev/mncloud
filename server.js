@@ -123,7 +123,7 @@ app.post('/api/auth/sign-in', async (req, res) => {
     }
 });
 
-// 3. Rota de Upload de Ficheiros Definitiva
+// 3. Rota de Upload de Ficheiros com Reutilização Estável de Sessão
 app.post('/api/upload', upload.single('file'), async (req, res) => {
     try {
         console.log("Recebendo requisição de upload...");
@@ -131,24 +131,33 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         const file = req.file;
 
         if (!file) {
-            console.warn("Nenhum arquivo encontrado no req.file");
             return res.status(400).json({ success: false, message: 'Nenhum arquivo enviado.' });
         }
 
         console.log(`Arquivo recebido: ${file.originalname} (${file.size} bytes)`);
 
+        // REUTILIZA O CLIENTE JÁ CONECTADO NA MEMÓRIA
         let client = activeSessions[phone];
+        
         if (!client) {
-            console.log("Restaurando sessão do Telegram através da sessionString...");
+            console.log("Criando nova sessão persistente na memória...");
             const stringSession = new StringSession(sessionString || '');
-            client = new TelegramClient(stringSession, Number(apiId), apiHash, { connectionRetries: 5 });
+            client = new TelegramClient(stringSession, Number(apiId), apiHash, { 
+                connectionRetries: 5,
+                useWSS: false // Garante estabilidade TCP full no Railway
+            });
             await client.connect();
             activeSessions[phone] = client;
+        } else {
+            console.log("Utilizando cliente Telegram já ativo na memória.");
+            // Garante que está conectado sem recriar a chave
+            if (!client.connected) {
+                await client.connect();
+            }
         }
 
         console.log("Enviando arquivo para o Telegram...");
 
-        // Correção aplicada aqui (terceiro argumento como undefined)
         const customFile = new CustomFile(
             file.originalname,
             file.size,
@@ -186,6 +195,12 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
     } catch (err) {
         console.error('ERRO DETALHADO NO UPLOAD:', err);
+        
+        // Se der erro de chave não registrada, limpa a sessão da memória para forçar renovação no próximo login
+        if (err.errorMessage === 'AUTH_KEY_UNREGISTERED' && req.body.phone) {
+            delete activeSessions[req.body.phone];
+        }
+
         res.status(500).json({ success: false, message: err.message || 'Erro interno no servidor' });
     }
 });
