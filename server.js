@@ -178,51 +178,57 @@ app.post('/api/upload-chunk', upload.single('file'), async (req, res) => {
             throw new Error('Falha ao gerar o arquivo unificado no disco temporário.');
         }
 
-        // --- GERENCIAMENTO DA SESSÃO TELEGRAM ---
-        let client = activeSessions[phone];
-        if (!client) {
-            const stringSession = new StringSession(sessionString);
-            client = new TelegramClient(stringSession, Number(apiId), apiHash, { 
-                connectionRetries: 5, 
-                useWSS: false,
-                timeout: 60000 
-            });
-            await client.connect();
-            activeSessions[phone] = client;
-        } else if (!client.connected) {
-            await client.connect();
-        }
-
-        console.log("Enviando arquivo unificado para o Telegram...");
-        const customFile = new CustomFile(fileName, Number(fileSize), finalFilePath);
-        
-        const uploadResult = await client.uploadFile({ 
-            file: customFile, 
-            workers: 1
-        });
-
-        let target = channelId;
-        if (target && String(target).startsWith('-100')) {
-            try { target = await client.getEntity(Number(target)); } catch (e) {}
-        }
-
-        const message = await client.sendFile(target || 'me', {
-            file: uploadResult,
-            caption: `📦 MNDRIVE UPLOAD: ${fileName}`,
-        });
-
-        if (fs.existsSync(finalFilePath)) {
-            try { fs.unlinkSync(finalFilePath); } catch (e) {}
-        }
-
-        let fileId = message.media && message.media.document ? message.media.document.id.toString() : 'tg_file_' + Date.now();
-
-        console.log("Upload por partes concluído com sucesso!");
-        return res.json({
+        // RESPONDE IMEDIATAMENTE AO NAVEGADOR PARA EVITAR ERRO 502!
+        res.json({
             success: true,
             finished: true,
-            messageId: message.id,
-            fileId: fileId
+            messageId: Date.now(), // ID temporário imediato
+            fileId: 'tg_file_' + Date.now()
+        });
+
+        // --- ENVIO PARA O TELEGRAM EM SEGUNDO PLANO (BACKGROUND) ---
+        setImmediate(async () => {
+            try {
+                let client = activeSessions[phone];
+                if (!client) {
+                    const stringSession = new StringSession(sessionString);
+                    client = new TelegramClient(stringSession, Number(apiId), apiHash, { 
+                        connectionRetries: 5, 
+                        useWSS: false,
+                        timeout: 60000 
+                    });
+                    await client.connect();
+                    activeSessions[phone] = client;
+                } else if (!client.connected) {
+                    await client.connect();
+                }
+
+                console.log(`[Background] Enviando ${fileName} para o Telegram...`);
+                const customFile = new CustomFile(fileName, Number(fileSize), finalFilePath);
+                
+                const uploadResult = await client.uploadFile({ 
+                    file: customFile, 
+                    workers: 1
+                });
+
+                let target = channelId;
+                if (target && String(target).startsWith('-100')) {
+                    try { target = await client.getEntity(Number(target)); } catch (e) {}
+                }
+
+                await client.sendFile(target || 'me', {
+                    file: uploadResult,
+                    caption: `📦 MNDRIVE UPLOAD: ${fileName}`,
+                });
+
+                console.log(`[Background] Arquivo ${fileName} enviado com sucesso para o Telegram!`);
+            } catch (bgErr) {
+                console.error('[Background Error] Falha ao enviar para o Telegram:', bgErr);
+            } finally {
+                if (fs.existsSync(finalFilePath)) {
+                    try { fs.unlinkSync(finalFilePath); } catch (e) {}
+                }
+            }
         });
 
     } catch (err) {
@@ -230,7 +236,9 @@ app.post('/api/upload-chunk', upload.single('file'), async (req, res) => {
         if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
             try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
         }
-        return res.status(500).json({ success: false, message: err.message || 'Erro interno no servidor' });
+        if (!res.headersSent) {
+            return res.status(500).json({ success: false, message: err.message || 'Erro interno no servidor' });
+        }
     }
 });
 
