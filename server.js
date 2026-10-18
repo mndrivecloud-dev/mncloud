@@ -1,6 +1,9 @@
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
+const os = require('os');
+const fs = require('fs');
+const path = require('path');
 const { TelegramClient, Api } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { CustomFile } = require('telegram/client/uploads');
@@ -10,20 +13,29 @@ app.use(cors());
 app.use(express.json({ limit: '4gb' }));
 app.use(express.urlencoded({ limit: '4gb', extended: true }));
 
-// Configuração otimizada do Multer com limite de tamanho de 4GB por arquivo
+// Configuração do Multer para salvar temporariamente no diretório /tmp do sistema (100% compatível com o GramJS)
 const upload = multer({ 
-    storage: multer.memoryStorage(),
-    limits: { fileSize: 4 * 1024 * 1024 * 1024 } // 4GB
+    storage: multer.diskStorage({
+        destination: (req, file, cb) => {
+            cb(null, os.tmpdir());
+        },
+        filename: (req, file, cb) => {
+            cb(null, `${Date.now()}-${file.originalname}`);
+        }
+    }),
+    limits: { fileSize: 4 * 1024 * 1024 * 1024 } // Limite máximo de 4GB por upload
 });
 
+// Endpoint de saúde / teste da API
 app.get('/', (req, res) => {
     res.json({ success: true, message: 'MNDRIVE API no Railway está online e operando!' });
 });
 
+// Armazenamento em memória para sessões ativas e logins pendentes
 const pendingLogins = {};
 const activeSessions = {};
 
-// 1. Enviar código de login
+// 1. Rota para enviar o código de verificação via Telegram
 app.post('/api/auth/send-code', async (req, res) => {
     try {
         const { apiId, apiHash, phone } = req.body;
@@ -55,7 +67,7 @@ app.post('/api/auth/send-code', async (req, res) => {
     }
 });
 
-// 2. Confirmar o código de login
+// 2. Rota para confirmar o código de login e inicializar a sessão
 app.post('/api/auth/sign-in', async (req, res) => {
     try {
         const { apiId, apiHash, phone, code, phoneCodeHash } = req.body;
@@ -123,21 +135,7 @@ app.post('/api/auth/sign-in', async (req, res) => {
     }
 });
 
-// Classe customizada para forçar o GramJS a ler buffers da memória RAM (mesmo em arquivos grandes)
-class MemoryFile extends CustomFile {
-    constructor(name, size, buffer) {
-        // Passamos 'undefined' no 3º argumento para que o GramJS saiba que NÃO é um arquivo em disco
-        super(name, size, undefined, buffer);
-        this.buffer = buffer;
-    }
-
-    // Sobrescrevemos a função slice do GramJS para fatiar diretamente o Buffer em memória
-    async slice(offset, length) {
-        return this.buffer.subarray(offset, offset + length);
-    }
-}
-
-// 3. Rota de Upload de Ficheiros com suporte total a arquivos grandes em memória
+// 3. Rota de Upload de Arquivos 100% compatível com arquivos grandes (via diskStorage temporário)
 app.post('/api/upload', upload.single('file'), async (req, res) => {
     try {
         console.log("Recebendo requisição de upload...");
@@ -145,19 +143,21 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         const file = req.file;
 
         if (!file) {
+            console.warn("Nenhum arquivo encontrado no req.file");
             return res.status(400).json({ success: false, message: 'Nenhum arquivo enviado.' });
         }
 
-        console.log(`Arquivo recebido: ${file.originalname} (${file.size} bytes)`);
+        console.log(`Arquivo recebido em disco: ${file.originalname} (${file.size} bytes) -> Caminho: ${file.path}`);
 
         let client = activeSessions[phone];
         
         if (!client) {
-            console.log("Restaurando sessão do Telegram...");
+            console.log("Restaurando sessão do Telegram a partir da sessionString...");
             if (!sessionString || sessionString.trim() === '' || sessionString === 'undefined') {
+                if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
                 return res.status(401).json({ 
                     success: false, 
-                    message: 'Sessão inválida. Por favor, faça login novamente.' 
+                    message: 'Sessão inválida. Por favor, faça login novamente no aplicativo.' 
                 });
             }
 
@@ -168,6 +168,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             });
             await client.connect();
             activeSessions[phone] = client;
+            console.log("Sessão restaurada e conectada com sucesso!");
         } else {
             console.log("Utilizando cliente Telegram já ativo na memória.");
             if (!client.connected) {
@@ -175,14 +176,14 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             }
         }
 
-        console.log("Enviando arquivo para o Telegram...");
+        console.log("Enviando arquivo para o Telegram a partir do caminho temporário...");
 
-        // Instancia o nosso adaptador de memória à prova de ENOENT
-        const memoryFile = new MemoryFile(file.originalname, file.size, file.buffer);
+        // Usando o caminho real do arquivo em disco (/tmp) para o CustomFile do GramJS
+        const customFile = new CustomFile(file.originalname, file.size, file.path);
 
         const uploadResult = await client.uploadFile({
-            file: memoryFile,
-            workers: 4,
+            file: customFile,
+            workers: 4, // 4 workers para máxima velocidade em arquivos grandes
         });
 
         let target = channelId;
@@ -190,7 +191,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             try {
                 target = await client.getEntity(Number(target));
             } catch (e) {
-                console.warn("Não foi possível buscar entidade pelo ID numérico, usando ID direto.");
+                console.warn("Não foi possível buscar a entidade pelo ID numérico, usando ID direto.");
             }
         }
 
@@ -199,9 +200,14 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             caption: `📦 MNDRIVE UPLOAD: ${file.originalname}`,
         });
 
+        // Limpa o arquivo temporário do disco do Railway após o envio
+        if (file.path && fs.existsSync(file.path)) {
+            fs.unlinkSync(file.path);
+        }
+
         let fileId = message.media && message.media.document ? message.media.document.id.toString() : 'tg_file_' + Date.now();
 
-        console.log("Upload concluído com sucesso no Telegram!");
+        console.log("Upload concluído com sucesso no Telegram e arquivo temporário limpo!");
         res.json({
             success: true,
             messageId: message.id,
@@ -211,6 +217,11 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     } catch (err) {
         console.error('ERRO DETALHADO NO UPLOAD:', err);
         
+        // Garante a remoção do arquivo temporário mesmo em caso de falha
+        if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+            try { fs.unlinkSync(req.file.path); } catch (e) {}
+        }
+
         if (err.errorMessage === 'AUTH_KEY_UNREGISTERED' && req.body.phone) {
             delete activeSessions[req.body.phone];
         }
@@ -219,6 +230,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     }
 });
 
+// Inicialização do Servidor Express
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`MNDRIVE API a executar na porta ${PORT}`);
