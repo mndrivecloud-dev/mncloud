@@ -10,14 +10,18 @@ app.use(cors());
 app.use(express.json({ limit: '4gb' }));
 app.use(express.urlencoded({ limit: '4gb', extended: true }));
 
-// Configuração do Multer para armazenar temporariamente o arquivo na memória do servidor antes de enviar ao Telegram
-const upload = multer({ storage: multer.memoryStorage() });
+// Configuração otimizada do Multer com limite de tamanho de 4GB por arquivo
+const upload = multer({ 
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 4 * 1024 * 1024 * 1024 } // 4GB
+});
 
 app.get('/', (req, res) => {
-    res.json({ success: true, message: 'MNDRIVE API no Railway está online!' });
+    res.json({ success: true, message: 'MNDRIVE API no Railway está online e operando!' });
 });
 
 const pendingLogins = {};
+const activeSessions = {};
 
 // 1. Enviar código de login
 app.post('/api/auth/send-code', async (req, res) => {
@@ -51,17 +55,14 @@ app.post('/api/auth/send-code', async (req, res) => {
     }
 });
 
-// Adicione um mapa global de sessões ativas no topo do server.js (junto com o pendingLogins)
-const activeSessions = {};
-
-// 2. Na rota de sign-in, salve a sessão ativa:
+// 2. Confirmar o código de login
 app.post('/api/auth/sign-in', async (req, res) => {
     try {
         const { apiId, apiHash, phone, code, phoneCodeHash } = req.body;
         const pending = pendingLogins[phone];
 
         if (!pending) {
-            return res.status(400).json({ success: false, message: 'Sessão expirada.' });
+            return res.status(400).json({ success: false, message: 'Sessão expirada ou telefone não encontrado.' });
         }
 
         const client = pending.client;
@@ -75,12 +76,38 @@ app.post('/api/auth/sign-in', async (req, res) => {
         );
 
         const sessionString = client.session.save();
-        
-        // SALVA O CLIENTE AUTENTICADO NA MEMÓRIA PARA USO NO UPLOAD
         activeSessions[phone] = client;
 
         const me = await client.getMe();
-        // ... (resto da lógica de canal) ...
+
+        let targetChannel = null;
+        const dialogs = await client.getDialogs({});
+        
+        for (const dialog of dialogs) {
+            if (dialog.isChannel && dialog.title === 'MNDRIVE CLOUD') {
+                targetChannel = dialog.entity;
+                break;
+            }
+        }
+
+        if (!targetChannel) {
+            try {
+                const result = await client.invoke(
+                    new Api.channels.CreateChannel({
+                        title: 'MNDRIVE CLOUD',
+                        about: 'Repositório oficial gerido pelo MNDRIVE Quantum Cloud.',
+                        megagroup: false,
+                    })
+                );
+                targetChannel = result.chats[0];
+            } catch (createErr) {
+                console.error('Erro ao criar o canal automaticamente:', createErr);
+            }
+        }
+
+        let chatId = targetChannel ? (targetChannel.id.toString().startsWith('-100') ? targetChannel.id.toString() : `-100${targetChannel.id}`) : me.id;
+
+        delete pendingLogins[phone];
 
         res.json({
             success: true,
@@ -89,34 +116,41 @@ app.post('/api/auth/sign-in', async (req, res) => {
             channelName: 'MNDRIVE CLOUD',
             user: { id: me.id, username: me.username, phone: me.phone }
         });
+
     } catch (err) {
+        console.error('Erro ao autenticar código:', err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
 
-// 3. Rota de Upload corrigida usando a sessão ativa do usuário
+// 3. Rota de Upload de Ficheiros com tratamento robusto
 app.post('/api/upload', upload.single('file'), async (req, res) => {
     try {
+        console.log("Recebendo requisição de upload...");
         const { phone, channelId, apiId, apiHash } = req.body;
         const file = req.file;
 
         if (!file) {
+            console.warn("Nenhum arquivo encontrado no req.file");
             return res.status(400).json({ success: false, message: 'Nenhum arquivo enviado.' });
         }
 
-        // Pega o cliente já logado ou reconecta se necessário
+        console.log(`Arquivo recebido: ${file.originalname} (${file.size} bytes)`);
+
         let client = activeSessions[phone];
         if (!client) {
+            console.log("Sessão ativa não encontrada na memória. Reconectando cliente Telegram...");
             client = new TelegramClient(new StringSession(''), Number(apiId), apiHash, { connectionRetries: 5 });
             await client.connect();
             activeSessions[phone] = client;
         }
 
+        console.log("Enviando arquivo para o Telegram...");
         const customFile = new CustomFile(file.originalname, file.size, '', file.buffer);
         const uploadedFile = await client.uploadFile(customFile, { workers: 2 });
 
         let target = channelId;
-        if (target && target.startsWith('-100')) {
+        if (target && String(target).startsWith('-100')) {
             target = await client.getEntity(Number(target));
         }
 
@@ -127,6 +161,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
         let fileId = message.media && message.media.document ? message.media.document.id.toString() : 'tg_file_' + Date.now();
 
+        console.log("Upload concluído com sucesso no Telegram!");
         res.json({
             success: true,
             messageId: message.id,
@@ -134,10 +169,11 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         });
 
     } catch (err) {
-        console.error('Erro no upload para o Telegram:', err);
+        console.error('Erro crítico no upload para o Telegram:', err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`MNDRIVE API a executar na porta ${PORT}`);
