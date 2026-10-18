@@ -1,12 +1,17 @@
 const express = require('express');
 const cors = require('cors');
+const multer = require('multer');
 const { TelegramClient, Api } = require('telegram');
 const { StringSession } = require('telegram/sessions');
+const { CustomFile } = require('telegram/client/uploads');
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '4gb' }));
 app.use(express.urlencoded({ limit: '4gb', extended: true }));
+
+// Configuração do Multer para armazenar temporariamente o arquivo na memória do servidor antes de enviar ao Telegram
+const upload = multer({ storage: multer.memoryStorage() });
 
 app.get('/', (req, res) => {
     res.json({ success: true, message: 'MNDRIVE API no Railway está online!' });
@@ -28,7 +33,6 @@ app.post('/api/auth/send-code', async (req, res) => {
 
         await client.connect();
         
-        // Solicita o envio do código via API nativa do Telegram
         const sendCodeResult = await client.invoke(
             new Api.auth.SendCode({
                 phoneNumber: phone,
@@ -47,7 +51,7 @@ app.post('/api/auth/send-code', async (req, res) => {
     }
 });
 
-// 2. Confirmar o código de login (Corrigido com Api.auth.SignIn) e criar o canal "MNDRIVE CLOUD"
+// 2. Confirmar o código de login e verificar/criar o canal "MNDRIVE CLOUD"
 app.post('/api/auth/sign-in', async (req, res) => {
     try {
         const { apiId, apiHash, phone, code, phoneCodeHash } = req.body;
@@ -59,7 +63,6 @@ app.post('/api/auth/sign-in', async (req, res) => {
 
         const client = pending.client;
 
-        // Autenticação utilizando a chamada correta da API do GramJS
         await client.invoke(
             new Api.auth.SignIn({
                 phoneNumber: phone,
@@ -71,7 +74,6 @@ app.post('/api/auth/sign-in', async (req, res) => {
         const sessionString = client.session.save();
         const me = await client.getMe();
 
-        // Verificar se o canal "MNDRIVE CLOUD" já existe
         let targetChannel = null;
         const dialogs = await client.getDialogs({});
         
@@ -82,7 +84,6 @@ app.post('/api/auth/sign-in', async (req, res) => {
             }
         }
 
-        // Se não existir, cria o canal automaticamente
         if (!targetChannel) {
             try {
                 const result = await client.invoke(
@@ -116,6 +117,60 @@ app.post('/api/auth/sign-in', async (req, res) => {
 
     } catch (err) {
         console.error('Erro ao autenticar código:', err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// 3. Rota de Upload de Ficheiros enviando diretamente para o Telegram
+app.post('/api/upload', upload.single('file'), async (req, res) => {
+    try {
+        const { phone, channelId, apiId, apiHash } = req.body;
+        const file = req.file;
+
+        if (!file) {
+            return res.status(400).json({ success: false, message: 'Nenhum arquivo enviado.' });
+        }
+
+        // Reconecta o cliente Telegram usando a sessão temporária baseada nas credenciais fornecidas
+        const client = new TelegramClient(new StringSession(''), Number(apiId), apiHash, {
+            connectionRetries: 5,
+        });
+
+        await client.connect();
+
+        // Prepara o arquivo binário para upload no Telegram via GramJS
+        const customFile = new CustomFile(file.originalname, file.size, '', file.buffer);
+        const uploadedFile = await client.uploadFile(customFile, {
+            workers: 2,
+        });
+
+        // Define o destino (canal MNDRIVE CLOUD ou Chat ID informado)
+        let target = channelId;
+        if (target && target.startsWith('-100')) {
+            target = await client.getEntity(Number(target));
+        }
+
+        // Envia o arquivo como documento ou mídia para o Telegram
+        const message = await client.sendFile(target || 'me', {
+            file: uploadedFile,
+            caption: `📦 MNDRIVE UPLOAD: ${file.originalname}`,
+        });
+
+        let fileId = 'tg_file_' + Date.now();
+        if (message.media && message.media.document) {
+            fileId = message.media.document.id.toString();
+        } else if (message.media && message.media.photo) {
+            fileId = message.media.photo.id.toString();
+        }
+
+        res.json({
+            success: true,
+            messageId: message.id,
+            fileId: fileId
+        });
+
+    } catch (err) {
+        console.error('Erro no upload para o Telegram:', err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
