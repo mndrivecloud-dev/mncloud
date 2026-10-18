@@ -157,18 +157,33 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
                 if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
                 return res.status(401).json({ 
                     success: false, 
-                    message: 'Sessão inválida. Por favor, faça login novamente no aplicativo.' 
+                    message: 'Sessão expirada. Por favor, clique em configurar e faça login novamente.' 
                 });
             }
 
-            const stringSession = new StringSession(sessionString);
-            client = new TelegramClient(stringSession, Number(apiId), apiHash, { 
-                connectionRetries: 5,
-                useWSS: false
-            });
-            await client.connect();
-            activeSessions[phone] = client;
-            console.log("Sessão restaurada e conectada com sucesso!");
+            try {
+                const stringSession = new StringSession(sessionString);
+                client = new TelegramClient(stringSession, Number(apiId), apiHash, { 
+                    connectionRetries: 3,
+                    useWSS: false
+                });
+                
+                // Conecta e valida se a sessão realmente responde
+                await client.connect();
+                
+                // Testa se a sessão é válida chamando getMe()
+                const testMe = await client.getMe();
+                console.log(`Sessão restaurada com sucesso para: ${testMe.firstName || testMe.phone}`);
+
+                activeSessions[phone] = client;
+            } catch (restoreErr) {
+                console.error("FALHA AO RESTAURAR SESSÃO:", restoreErr);
+                if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
+                return res.status(401).json({ 
+                    success: false, 
+                    message: 'A sessão do Telegram expirou ou é inválida. Por favor, reconecte a conta.' 
+                });
+            }
         } else {
             console.log("Utilizando cliente Telegram já ativo na memória.");
             if (!client.connected) {
