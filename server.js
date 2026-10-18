@@ -148,11 +148,11 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
         console.log("Enviando arquivo para o Telegram...");
 
-        // Garante que o buffer do multer seja lido perfeitamente pelo CustomFile
+        // Correção aplicada aqui (terceiro argumento como undefined)
         const customFile = new CustomFile(
             file.originalname,
             file.size,
-            '',
+            undefined,
             file.buffer
         );
 
