@@ -123,7 +123,21 @@ app.post('/api/auth/sign-in', async (req, res) => {
     }
 });
 
-// 3. Rota de Upload de Ficheiros Definitiva e Robusta
+// Classe customizada para forçar o GramJS a ler buffers da memória RAM (mesmo em arquivos grandes)
+class MemoryFile extends CustomFile {
+    constructor(name, size, buffer) {
+        // Passamos 'undefined' no 3º argumento para que o GramJS saiba que NÃO é um arquivo em disco
+        super(name, size, undefined, buffer);
+        this.buffer = buffer;
+    }
+
+    // Sobrescrevemos a função slice do GramJS para fatiar diretamente o Buffer em memória
+    async slice(offset, length) {
+        return this.buffer.subarray(offset, offset + length);
+    }
+}
+
+// 3. Rota de Upload de Ficheiros com suporte total a arquivos grandes em memória
 app.post('/api/upload', upload.single('file'), async (req, res) => {
     try {
         console.log("Recebendo requisição de upload...");
@@ -138,15 +152,12 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
         let client = activeSessions[phone];
         
-        // Se a sessão na memória não existe OU se a sessionString mudou, recria o cliente com segurança
         if (!client) {
-            console.log("Restaurando sessão persistente do Telegram...");
-            
-            // Valida se a sessionString foi enviada corretamente
+            console.log("Restaurando sessão do Telegram...");
             if (!sessionString || sessionString.trim() === '' || sessionString === 'undefined') {
                 return res.status(401).json({ 
                     success: false, 
-                    message: 'Sessão inválida ou não encontrada. Por favor, faça login novamente no aplicativo.' 
+                    message: 'Sessão inválida. Por favor, faça login novamente.' 
                 });
             }
 
@@ -155,10 +166,8 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
                 connectionRetries: 5,
                 useWSS: false
             });
-            
             await client.connect();
             activeSessions[phone] = client;
-            console.log("Sessão restaurada e conectada com sucesso!");
         } else {
             console.log("Utilizando cliente Telegram já ativo na memória.");
             if (!client.connected) {
@@ -168,16 +177,11 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
         console.log("Enviando arquivo para o Telegram...");
 
-        const customFile = new CustomFile(
-            file.originalname,
-            file.size,
-            file.originalname,
-            file.buffer
-        );
-        customFile.buffer = file.buffer;
+        // Instancia o nosso adaptador de memória à prova de ENOENT
+        const memoryFile = new MemoryFile(file.originalname, file.size, file.buffer);
 
         const uploadResult = await client.uploadFile({
-            file: customFile,
+            file: memoryFile,
             workers: 4,
         });
 
@@ -186,7 +190,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             try {
                 target = await client.getEntity(Number(target));
             } catch (e) {
-                console.warn("Não foi possível buscar a entidade pelo ID numérico, usando ID direto.");
+                console.warn("Não foi possível buscar entidade pelo ID numérico, usando ID direto.");
             }
         }
 
@@ -207,7 +211,6 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     } catch (err) {
         console.error('ERRO DETALHADO NO UPLOAD:', err);
         
-        // Se a chave for inválida ou unregistered, limpa imediatamente da memória
         if (err.errorMessage === 'AUTH_KEY_UNREGISTERED' && req.body.phone) {
             delete activeSessions[req.body.phone];
         }
