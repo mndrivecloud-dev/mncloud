@@ -123,7 +123,7 @@ app.post('/api/auth/sign-in', async (req, res) => {
     }
 });
 
-// 3. Rota de Upload de Ficheiros com recuperação correta da sessão
+// 3. Rota de Upload de Ficheiros Definitiva
 app.post('/api/upload', upload.single('file'), async (req, res) => {
     try {
         console.log("Recebendo requisição de upload...");
@@ -138,8 +138,6 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         console.log(`Arquivo recebido: ${file.originalname} (${file.size} bytes)`);
 
         let client = activeSessions[phone];
-        
-        // Se o cliente não estiver na memória, recria utilizando a sessionString real enviada pelo front-end
         if (!client) {
             console.log("Restaurando sessão do Telegram através da sessionString...");
             const stringSession = new StringSession(sessionString || '');
@@ -150,9 +148,17 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
         console.log("Enviando arquivo para o Telegram...");
 
+        // Garante que o buffer do multer seja lido perfeitamente pelo CustomFile
+        const customFile = new CustomFile(
+            file.originalname,
+            file.size,
+            '',
+            file.buffer
+        );
+
         const uploadResult = await client.uploadFile({
-            file: new CustomFile(file.originalname, file.size, '', file.buffer),
-            workers: 2,
+            file: customFile,
+            workers: 4,
         });
 
         let target = channelId;
