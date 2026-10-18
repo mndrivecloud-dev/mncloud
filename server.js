@@ -123,7 +123,7 @@ app.post('/api/auth/sign-in', async (req, res) => {
     }
 });
 
-// 3. Rota de Upload de Ficheiros com tratamento robusto
+// 3. Rota de Upload de Ficheiros com correção no CustomFile
 app.post('/api/upload', upload.single('file'), async (req, res) => {
     try {
         console.log("Recebendo requisição de upload...");
@@ -131,23 +131,34 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         const file = req.file;
 
         if (!file) {
+            console.warn("Nenhum arquivo encontrado no req.file");
             return res.status(400).json({ success: false, message: 'Nenhum arquivo enviado.' });
         }
 
+        console.log(`Arquivo recebido: ${file.originalname} (${file.size} bytes)`);
+
         let client = activeSessions[phone];
         if (!client) {
-            console.log("Reconectando cliente Telegram...");
+            console.log("Sessão ativa não encontrada na memória. Reconectando cliente Telegram...");
             client = new TelegramClient(new StringSession(''), Number(apiId), apiHash, { connectionRetries: 5 });
             await client.connect();
             activeSessions[phone] = client;
         }
 
-        const customFile = new CustomFile(file.originalname, file.size, '', file.buffer);
+        console.log("Enviando arquivo para o Telegram...");
+        
+        // CORREÇÃO CRÍTICA: passar o nome original do ficheiro no 3º parâmetro do CustomFile
+        const customFile = new CustomFile(file.originalname, file.size, file.originalname, file.buffer);
+        
         const uploadedFile = await client.uploadFile(customFile, { workers: 2 });
 
         let target = channelId;
         if (target && String(target).startsWith('-100')) {
-            target = await client.getEntity(Number(target));
+            try {
+                target = await client.getEntity(Number(target));
+            } catch (e) {
+                console.warn("Não foi possível buscar a entidade pelo ID numérico, usando string/ID direto.");
+            }
         }
 
         const message = await client.sendFile(target || 'me', {
@@ -157,6 +168,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
         let fileId = message.media && message.media.document ? message.media.document.id.toString() : 'tg_file_' + Date.now();
 
+        console.log("Upload concluído com sucesso no Telegram!");
         res.json({
             success: true,
             messageId: message.id,
@@ -164,7 +176,6 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         });
 
     } catch (err) {
-        // ISTO VAI MOSTRAR O ERRO REAL NO LOG DO RAILWAY
         console.error('ERRO DETALHADO NO UPLOAD:', err);
         res.status(500).json({ success: false, message: err.message || 'Erro interno no servidor' });
     }
