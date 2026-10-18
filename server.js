@@ -123,11 +123,11 @@ app.post('/api/auth/sign-in', async (req, res) => {
     }
 });
 
-// 3. Rota de Upload de Ficheiros à prova de falhas
+// 3. Rota de Upload de Ficheiros com recuperação correta da sessão
 app.post('/api/upload', upload.single('file'), async (req, res) => {
     try {
         console.log("Recebendo requisição de upload...");
-        const { phone, channelId, apiId, apiHash } = req.body;
+        const { phone, channelId, apiId, apiHash, sessionString } = req.body;
         const file = req.file;
 
         if (!file) {
@@ -138,16 +138,18 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         console.log(`Arquivo recebido: ${file.originalname} (${file.size} bytes)`);
 
         let client = activeSessions[phone];
+        
+        // Se o cliente não estiver na memória, recria utilizando a sessionString real enviada pelo front-end
         if (!client) {
-            console.log("Sessão ativa não encontrada na memória. Reconectando cliente Telegram...");
-            client = new TelegramClient(new StringSession(''), Number(apiId), apiHash, { connectionRetries: 5 });
+            console.log("Restaurando sessão do Telegram através da sessionString...");
+            const stringSession = new StringSession(sessionString || '');
+            client = new TelegramClient(stringSession, Number(apiId), apiHash, { connectionRetries: 5 });
             await client.connect();
             activeSessions[phone] = client;
         }
 
         console.log("Enviando arquivo para o Telegram...");
 
-        // Abordagem direta compatível com o Buffer do Multer no GramJS
         const uploadResult = await client.uploadFile({
             file: new CustomFile(file.originalname, file.size, '', file.buffer),
             workers: 2,
