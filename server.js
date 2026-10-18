@@ -8,15 +8,13 @@ app.use(cors());
 app.use(express.json({ limit: '4gb' }));
 app.use(express.urlencoded({ limit: '4gb', extended: true }));
 
-// Rota de teste
 app.get('/', (req, res) => {
     res.json({ success: true, message: 'MNDRIVE API no Railway está online!' });
 });
 
-// Armazenamento temporário em memória para sessões em progresso de login
 const pendingLogins = {};
 
-// 1. Enviar código de login para o Telegram
+// 1. Enviar código de login
 app.post('/api/auth/send-code', async (req, res) => {
     try {
         const { apiId, apiHash, phone } = req.body;
@@ -29,22 +27,27 @@ app.post('/api/auth/send-code', async (req, res) => {
         });
 
         await client.connect();
-        const { phoneCodeHash } = await client.sendCode(
-            { apiId: Number(apiId), apiHash },
-            phone,
-            false
+        
+        // Solicita o envio do código via API nativa do Telegram
+        const sendCodeResult = await client.invoke(
+            new Api.auth.SendCode({
+                phoneNumber: phone,
+                apiId: Number(apiId),
+                apiHash: apiHash,
+                settings: new Api.CodeSettings({}),
+            })
         );
 
-        pendingLogins[phone] = { client, phoneCodeHash };
+        pendingLogins[phone] = { client, phoneCodeHash: sendCodeResult.phoneCodeHash };
 
-        res.json({ success: true, phoneCodeHash });
+        res.json({ success: true, phoneCodeHash: sendCodeResult.phoneCodeHash });
     } catch (err) {
         console.error('Erro ao enviar código:', err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
 
-// 2. Confirmar o código de login e verificar/criar o canal "MNDRIVE CLOUD"
+// 2. Confirmar o código de login (Corrigido com Api.auth.SignIn) e criar o canal "MNDRIVE CLOUD"
 app.post('/api/auth/sign-in', async (req, res) => {
     try {
         const { apiId, apiHash, phone, code, phoneCodeHash } = req.body;
@@ -56,11 +59,14 @@ app.post('/api/auth/sign-in', async (req, res) => {
 
         const client = pending.client;
 
-        await client.signIn({
-            phoneNumber: phone,
-            phoneCodeHash: phoneCodeHash || pending.phoneCodeHash,
-            phoneCode: code,
-        });
+        // Autenticação utilizando a chamada correta da API do GramJS
+        await client.invoke(
+            new Api.auth.SignIn({
+                phoneNumber: phone,
+                phoneCodeHash: phoneCodeHash || pending.phoneCodeHash,
+                phoneCode: code,
+            })
+        );
 
         const sessionString = client.session.save();
         const me = await client.getMe();
@@ -110,16 +116,6 @@ app.post('/api/auth/sign-in', async (req, res) => {
 
     } catch (err) {
         console.error('Erro ao autenticar código:', err);
-        res.status(500).json({ success: false, message: err.message });
-    }
-});
-
-// 3. Rota de Upload de Ficheiros para o canal
-app.post('/api/upload', async (req, res) => {
-    try {
-        res.json({ success: true, message: 'Endpoint de upload pronto no Railway.' });
-    } catch (err) {
-        console.error('Erro no upload:', err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
