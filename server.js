@@ -123,7 +123,7 @@ app.post('/api/auth/sign-in', async (req, res) => {
     }
 });
 
-// 3. Rota de Upload de Ficheiros com correção no CustomFile
+// 3. Rota de Upload de Ficheiros à prova de falhas
 app.post('/api/upload', upload.single('file'), async (req, res) => {
     try {
         console.log("Recebendo requisição de upload...");
@@ -146,23 +146,24 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         }
 
         console.log("Enviando arquivo para o Telegram...");
-        
-        // CORREÇÃO CRÍTICA: passar o nome original do ficheiro no 3º parâmetro do CustomFile
-        const customFile = new CustomFile(file.originalname, file.size, file.originalname, file.buffer);
-        
-        const uploadedFile = await client.uploadFile(customFile, { workers: 2 });
+
+        // Abordagem direta compatível com o Buffer do Multer no GramJS
+        const uploadResult = await client.uploadFile({
+            file: new CustomFile(file.originalname, file.size, '', file.buffer),
+            workers: 2,
+        });
 
         let target = channelId;
         if (target && String(target).startsWith('-100')) {
             try {
                 target = await client.getEntity(Number(target));
             } catch (e) {
-                console.warn("Não foi possível buscar a entidade pelo ID numérico, usando string/ID direto.");
+                console.warn("Não foi possível buscar a entidade pelo ID numérico, usando ID direto.");
             }
         }
 
         const message = await client.sendFile(target || 'me', {
-            file: uploadedFile,
+            file: uploadResult,
             caption: `📦 MNDRIVE UPLOAD: ${file.originalname}`,
         });
 
