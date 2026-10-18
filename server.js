@@ -127,9 +127,8 @@ app.post('/api/auth/sign-in', async (req, res) => {
     }
 });
 
-// Rota de Upload por Partes Otimizada para evitar 502
+// Rota de Upload por Partes Otimizada
 app.post('/api/upload-chunk', upload.single('file'), async (req, res) => {
-    // Força timeouts estendidos no nível do socket HTTP do Node.js
     req.socket.setTimeout(1800000);
     res.setTimeout(1800000);
 
@@ -160,21 +159,24 @@ app.post('/api/upload-chunk', upload.single('file'), async (req, res) => {
             return res.json({ success: true, finished: false });
         }
 
-        // --- TODAS AS PARTES CHEGARAM: UNINDO ARQUIVO ---
+        // --- TODAS AS PARTES CHEGARAM: UNINDO ARQUIVO SÍNCRONAMENTE ---
         console.log(`Todas as partes recebidas para ${fileName}. Unindo arquivo...`);
         const finalFilePath = path.join(os.tmpdir(), `merged_${Date.now()}_${fileName}`);
-        const writeStream = fs.createWriteStream(finalFilePath);
-
+        
+        const buffers = [];
         for (let chunkPath of session.chunks) {
             if (chunkPath && fs.existsSync(chunkPath)) {
-                const data = fs.readFileSync(chunkPath);
-                writeStream.write(data);
+                buffers.push(fs.readFileSync(chunkPath));
                 try { fs.unlinkSync(chunkPath); } catch (e) {}
             }
         }
-        writeStream.end();
-
+        
+        fs.writeFileSync(finalFilePath, Buffer.concat(buffers));
         delete chunkUploads[uploadSessionId];
+
+        if (!fs.existsSync(finalFilePath)) {
+            throw new Error('Falha ao gerar o arquivo unificado no disco temporário.');
+        }
 
         // --- GERENCIAMENTO DA SESSÃO TELEGRAM ---
         let client = activeSessions[phone];
@@ -194,13 +196,9 @@ app.post('/api/upload-chunk', upload.single('file'), async (req, res) => {
         console.log("Enviando arquivo unificado para o Telegram...");
         const customFile = new CustomFile(fileName, Number(fileSize), finalFilePath);
         
-        // Workers reduzidos para 1 para poupar RAM e prevenir estouro de memória no Railway
         const uploadResult = await client.uploadFile({ 
             file: customFile, 
-            workers: 1,
-            onProgress: (progress) => {
-                // Evita log excessivo, mas mantém a conexão ativa
-            }
+            workers: 1
         });
 
         let target = channelId;
@@ -274,6 +272,5 @@ const server = app.listen(PORT, () => {
     console.log(`MNDRIVE API a executar na porta ${PORT}`);
 });
 
-// Timeout global de socket para prevenir quedas de proxy 502 do Railway
 server.timeout = 1800000;
 server.keepAliveTimeout = 60000;
