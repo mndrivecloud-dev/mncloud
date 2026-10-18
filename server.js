@@ -34,6 +34,7 @@ app.get('/', (req, res) => {
 // Armazenamento em memória para sessões ativas e logins pendentes
 const pendingLogins = {};
 const activeSessions = {};
+const chunkUploads = {}; // Armazenamento temporário para uploads fatiados
 
 // 1. Rota para enviar o código de verificação via Telegram
 app.post('/api/auth/send-code', async (req, res) => {
@@ -135,75 +136,43 @@ app.post('/api/auth/sign-in', async (req, res) => {
     }
 });
 
-// 3. Rota de Upload Otimizada para evitar Erro 502 em arquivos grandes
+// 3. Rota de Upload Tradicional (Mantida para compatibilidade)
 app.post('/api/upload', upload.single('file'), async (req, res) => {
-    // Aumenta o timeout desta rota específica do Express para 30 minutos (1800000 ms)
     req.setTimeout(1800000);
     res.setTimeout(1800000);
 
     try {
-        console.log("Recebendo requisição de upload...");
+        console.log("Recebendo requisição de upload tradicional...");
         const { phone, channelId, apiId, apiHash, sessionString } = req.body;
         const file = req.file;
 
         if (!file) {
-            console.warn("Nenhum arquivo encontrado no req.file");
             return res.status(400).json({ success: false, message: 'Nenhum arquivo enviado.' });
         }
-
-        console.log(`Arquivo recebido em disco: ${file.originalname} (${file.size} bytes) -> Caminho: ${file.path}`);
 
         let client = activeSessions[phone];
         
         if (!client) {
-            console.log("Restaurando sessão do Telegram a partir da sessionString...");
             if (!sessionString || sessionString.trim() === '' || sessionString === 'undefined') {
                 if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
-                return res.status(401).json({ 
-                    success: false, 
-                    message: 'Sessão expirada. Por favor, reconecte a conta.' 
-                });
+                return res.status(401).json({ success: false, message: 'Sessão expirada. Reconecte a conta.' });
             }
 
-            try {
-                const stringSession = new StringSession(sessionString);
-                client = new TelegramClient(stringSession, Number(apiId), apiHash, { 
-                    connectionRetries: 5,
-                    useWSS: false
-                });
-                
-                await client.connect();
-                await client.getMe();
-                activeSessions[phone] = client;
-            } catch (restoreErr) {
-                console.error("FALHA AO RESTAURAR SESSÃO:", restoreErr);
-                if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
-                return res.status(401).json({ success: false, message: 'A sessão do Telegram expirou.' });
-            }
-        } else {
-            if (!client.connected) {
-                await client.connect();
-            }
+            const stringSession = new StringSession(sessionString);
+            client = new TelegramClient(stringSession, Number(apiId), apiHash, { connectionRetries: 5, useWSS: false });
+            await client.connect();
+            await client.getMe();
+            activeSessions[phone] = client;
+        } else if (!client.connected) {
+            await client.connect();
         }
 
-        console.log("Enviando arquivo para o Telegram a partir do caminho temporário...");
-
-        // Configura o arquivo customizado para o GramJS com leituras em blocos seguros
         const customFile = new CustomFile(file.originalname, file.size, file.path);
-
-        // Ajuste de workers para 2 (evita estrangular a CPU/RAM de instâncias gratuitas em arquivos >2GB)
-        const uploadResult = await client.uploadFile({
-            file: customFile,
-            workers: 2, 
-        });
+        const uploadResult = await client.uploadFile({ file: customFile, workers: 2 });
 
         let target = channelId;
         if (target && String(target).startsWith('-100')) {
-            try {
-                target = await client.getEntity(Number(target));
-            } catch (e) {
-                console.warn("Usando target direto.");
-            }
+            try { target = await client.getEntity(Number(target)); } catch (e) {}
         }
 
         const message = await client.sendFile(target || 'me', {
@@ -211,34 +180,113 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             caption: `📦 MNDRIVE UPLOAD: ${file.originalname}`,
         });
 
-        // Limpa o arquivo temporário do disco do Railway imediatamente após o sucesso
-        if (file.path && fs.existsSync(file.path)) {
-            fs.unlinkSync(file.path);
+        if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
+
+        let fileId = message.media && message.media.document ? message.media.document.id.toString() : 'tg_file_' + Date.now();
+
+        res.json({ success: true, messageId: message.id, fileId: fileId });
+
+    } catch (err) {
+        console.error('ERRO NO UPLOAD:', err);
+        if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+            try { fs.unlinkSync(req.file.path); } catch (e) {}
+        }
+        res.status(500).json({ success: false, message: err.message || 'Erro interno no servidor' });
+    }
+});
+
+// 3.1 Rota de Upload por Partes (Chunks) - SOLUÇÃO DEFINITIVA PARA ARQUIVOS GRANDES SEM ERRO 502
+app.post('/api/upload-chunk', upload.single('file'), async (req, res) => {
+    req.setTimeout(1800000);
+    res.setTimeout(1800000);
+
+    try {
+        const { phone, channelId, apiId, apiHash, sessionString, uploadSessionId, chunkIndex, totalChunks, fileName, fileSize } = req.body;
+        const file = req.file;
+
+        if (!file) {
+            return res.status(400).json({ success: false, message: 'Nenhum pedaço enviado.' });
+        }
+
+        if (!chunkUploads[uploadSessionId]) {
+            chunkUploads[uploadSessionId] = {
+                fileName,
+                fileSize: Number(fileSize),
+                totalChunks: Number(totalChunks),
+                chunks: []
+            };
+        }
+
+        chunkUploads[uploadSessionId].chunks[Number(chunkIndex)] = file.path;
+
+        const session = chunkUploads[uploadSessionId];
+        const receivedChunksCount = session.chunks.filter(p => p !== undefined).length;
+
+        if (receivedChunksCount < session.totalChunks) {
+            return res.json({ success: true, finished: false });
+        }
+
+        // Todas as partes chegaram: unir arquivo
+        console.log(`Todas as partes recebidas para ${fileName}. Unindo arquivo...`);
+        const finalFilePath = path.join(os.tmpdir(), `merged_${Date.now()}_${fileName}`);
+        const writeStream = fs.createWriteStream(finalFilePath);
+
+        for (let chunkPath of session.chunks) {
+            const data = fs.readFileSync(chunkPath);
+            writeStream.write(data);
+            try { fs.unlinkSync(chunkPath); } catch (e) {}
+        }
+        writeStream.end();
+
+        delete chunkUploads[uploadSessionId];
+
+        let client = activeSessions[phone];
+        if (!client) {
+            const stringSession = new StringSession(sessionString);
+            client = new TelegramClient(stringSession, Number(apiId), apiHash, { connectionRetries: 5, useWSS: false });
+            await client.connect();
+            activeSessions[phone] = client;
+        } else if (!client.connected) {
+            await client.connect();
+        }
+
+        console.log("Enviando arquivo unificado para o Telegram...");
+        const customFile = new CustomFile(fileName, Number(fileSize), finalFilePath);
+        const uploadResult = await client.uploadFile({ file: customFile, workers: 2 });
+
+        let target = channelId;
+        if (target && String(target).startsWith('-100')) {
+            try { target = await client.getEntity(Number(target)); } catch (e) {}
+        }
+
+        const message = await client.sendFile(target || 'me', {
+            file: uploadResult,
+            caption: `📦 MNDRIVE UPLOAD: ${fileName}`,
+        });
+
+        if (fs.existsSync(finalFilePath)) {
+            fs.unlinkSync(finalFilePath);
         }
 
         let fileId = message.media && message.media.document ? message.media.document.id.toString() : 'tg_file_' + Date.now();
 
-        console.log("Upload concluído com sucesso no Telegram e arquivo temporário limpo!");
+        console.log("Upload por partes concluído com sucesso!");
         return res.json({
             success: true,
+            finished: true,
             messageId: message.id,
             fileId: fileId
         });
 
     } catch (err) {
-        console.error('ERRO DETALHADO NO UPLOAD:', err);
-        
+        console.error('ERRO NO UPLOAD POR PARTES:', err);
         if (req.file && req.file.path && fs.existsSync(req.file.path)) {
             try { fs.unlinkSync(req.file.path); } catch (e) {}
         }
-
-        if (err.errorMessage === 'AUTH_KEY_UNREGISTERED' && req.body.phone) {
-            delete activeSessions[req.body.phone];
-        }
-
         return res.status(500).json({ success: false, message: err.message || 'Erro interno no servidor' });
     }
 });
+
 // 4. Rota para apagar arquivo do Telegram (baseado no messageId)
 app.post('/api/delete-file', async (req, res) => {
     try {
@@ -252,7 +300,6 @@ app.post('/api/delete-file', async (req, res) => {
         let client = activeSessions[phone];
         
         if (!client) {
-            console.log("Restaurando sessão do Telegram para exclusão...");
             if (!sessionString || sessionString.trim() === '' || sessionString === 'undefined') {
                 return res.status(401).json({ success: false, message: 'Sessão inválida.' });
             }
@@ -279,7 +326,6 @@ app.post('/api/delete-file', async (req, res) => {
             }
         }
 
-        // Apaga a mensagem correspondente no canal do Telegram
         await client.deleteMessages(target || 'me', [Number(messageId)], { revoke: true });
 
         console.log(`Mensagem ${messageId} apagada com sucesso do Telegram!`);
