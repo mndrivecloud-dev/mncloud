@@ -230,6 +230,58 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     }
 });
 
+// 4. Rota para apagar arquivo do Telegram (baseado no messageId)
+app.post('/api/delete-file', async (req, res) => {
+    try {
+        console.log("Recebendo requisição para apagar arquivo...");
+        const { phone, channelId, apiId, apiHash, sessionString, messageId } = req.body;
+
+        if (!messageId || !phone) {
+            return res.status(400).json({ success: false, message: 'Parâmetros insuficientes para exclusão.' });
+        }
+
+        let client = activeSessions[phone];
+        
+        if (!client) {
+            console.log("Restaurando sessão do Telegram para exclusão...");
+            if (!sessionString || sessionString.trim() === '' || sessionString === 'undefined') {
+                return res.status(401).json({ success: false, message: 'Sessão inválida.' });
+            }
+
+            const stringSession = new StringSession(sessionString);
+            client = new TelegramClient(stringSession, Number(apiId), apiHash, { 
+                connectionRetries: 5,
+                useWSS: false
+            });
+            await client.connect();
+            activeSessions[phone] = client;
+        } else {
+            if (!client.connected) {
+                await client.connect();
+            }
+        }
+
+        let target = channelId;
+        if (target && String(target).startsWith('-100')) {
+            try {
+                target = await client.getEntity(Number(target));
+            } catch (e) {
+                console.warn("Usando target direto.");
+            }
+        }
+
+        // Apaga a mensagem correspondente no canal do Telegram
+        await client.deleteMessages(target || 'me', [Number(messageId)], { revoke: true });
+
+        console.log(`Mensagem ${messageId} apagada com sucesso do Telegram!`);
+        res.json({ success: true, message: 'Arquivo apagado do Telegram com sucesso.' });
+
+    } catch (err) {
+        console.error('ERRO DETALHADO AO APAGAR:', err);
+        res.status(500).json({ success: false, message: err.message || 'Erro interno ao apagar' });
+    }
+});
+
 // Inicialização do Servidor Express
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
