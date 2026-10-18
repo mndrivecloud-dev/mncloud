@@ -13,6 +13,7 @@ app.use(cors());
 app.use(express.json({ limit: '4gb' }));
 app.use(express.urlencoded({ limit: '4gb', extended: true }));
 
+// Configuração do Multer para salvar temporariamente no diretório /tmp do sistema (100% compatível com o GramJS)
 const upload = multer({ 
     storage: multer.diskStorage({
         destination: (req, file, cb) => {
@@ -22,17 +23,19 @@ const upload = multer({
             cb(null, `${Date.now()}-${file.originalname}`);
         }
     }),
-    limits: { fileSize: 4 * 1024 * 1024 * 1024 }
+    limits: { fileSize: 4 * 1024 * 1024 * 1024 } // Limite máximo de 4GB por upload
 });
 
+// Endpoint de saúde / teste da API
 app.get('/', (req, res) => {
     res.json({ success: true, message: 'MNDRIVE API no Railway está online e operando!' });
 });
 
+// Armazenamento em memória para sessões ativas e logins pendentes
 const pendingLogins = {};
 const activeSessions = {};
-const chunkUploads = {};
 
+// 1. Rota para enviar o código de verificação via Telegram
 app.post('/api/auth/send-code', async (req, res) => {
     try {
         const { apiId, apiHash, phone } = req.body;
@@ -56,6 +59,7 @@ app.post('/api/auth/send-code', async (req, res) => {
         );
 
         pendingLogins[phone] = { client, phoneCodeHash: sendCodeResult.phoneCodeHash };
+
         res.json({ success: true, phoneCodeHash: sendCodeResult.phoneCodeHash });
     } catch (err) {
         console.error('Erro ao enviar código:', err);
@@ -63,6 +67,7 @@ app.post('/api/auth/send-code', async (req, res) => {
     }
 });
 
+// 2. Rota para confirmar o código de login e inicializar a sessão
 app.post('/api/auth/sign-in', async (req, res) => {
     try {
         const { apiId, apiHash, phone, code, phoneCodeHash } = req.body;
@@ -86,6 +91,7 @@ app.post('/api/auth/sign-in', async (req, res) => {
         activeSessions[phone] = client;
 
         const me = await client.getMe();
+
         let targetChannel = null;
         const dialogs = await client.getDialogs({});
         
@@ -112,6 +118,7 @@ app.post('/api/auth/sign-in', async (req, res) => {
         }
 
         let chatId = targetChannel ? (targetChannel.id.toString().startsWith('-100') ? targetChannel.id.toString() : `-100${targetChannel.id}`) : me.id;
+
         delete pendingLogins[phone];
 
         res.json({
@@ -121,164 +128,177 @@ app.post('/api/auth/sign-in', async (req, res) => {
             channelName: 'MNDRIVE CLOUD',
             user: { id: me.id, username: me.username, phone: me.phone }
         });
+
     } catch (err) {
         console.error('Erro ao autenticar código:', err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
 
-// Rota de Upload por Partes Otimizada
-app.post('/api/upload-chunk', upload.single('file'), async (req, res) => {
-    req.socket.setTimeout(1800000);
-    res.setTimeout(1800000);
-
-    let uploadedFilePath = req.file ? req.file.path : null;
-
+// 3. Rota de Upload de Arquivos 100% compatível com arquivos grandes (via diskStorage temporário)
+app.post('/api/upload', upload.single('file'), async (req, res) => {
     try {
-        const { phone, channelId, apiId, apiHash, sessionString, uploadSessionId, chunkIndex, totalChunks, fileName, fileSize } = req.body;
+        console.log("Recebendo requisição de upload...");
+        const { phone, channelId, apiId, apiHash, sessionString } = req.body;
+        const file = req.file;
+
+        if (!file) {
+            console.warn("Nenhum arquivo encontrado no req.file");
+            return res.status(400).json({ success: false, message: 'Nenhum arquivo enviado.' });
+        }
+
+        console.log(`Arquivo recebido em disco: ${file.originalname} (${file.size} bytes) -> Caminho: ${file.path}`);
+
+        let client = activeSessions[phone];
         
-        if (!req.file) {
-            return res.status(400).json({ success: false, message: 'Nenhum pedaço enviado.' });
-        }
+        if (!client) {
+            console.log("Restaurando sessão do Telegram a partir da sessionString...");
+            if (!sessionString || sessionString.trim() === '' || sessionString === 'undefined') {
+                if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
+                return res.status(401).json({ 
+                    success: false, 
+                    message: 'Sessão expirada. Por favor, clique em configurar e faça login novamente.' 
+                });
+            }
 
-        if (!chunkUploads[uploadSessionId]) {
-            chunkUploads[uploadSessionId] = {
-                fileName,
-                fileSize: Number(fileSize),
-                totalChunks: Number(totalChunks),
-                chunks: []
-            };
-        }
+            try {
+                const stringSession = new StringSession(sessionString);
+                client = new TelegramClient(stringSession, Number(apiId), apiHash, { 
+                    connectionRetries: 3,
+                    useWSS: false
+                });
+                
+                // Conecta e valida se a sessão realmente responde
+                await client.connect();
+                
+                // Testa se a sessão é válida chamando getMe()
+                const testMe = await client.getMe();
+                console.log(`Sessão restaurada com sucesso para: ${testMe.firstName || testMe.phone}`);
 
-        chunkUploads[uploadSessionId].chunks[Number(chunkIndex)] = req.file.path;
-
-        const session = chunkUploads[uploadSessionId];
-        const receivedChunksCount = session.chunks.filter(p => p !== undefined).length;
-
-        if (receivedChunksCount < session.totalChunks) {
-            return res.json({ success: true, finished: false });
-        }
-
-        // --- TODAS AS PARTES CHEGARAM: UNINDO ARQUIVO SÍNCRONAMENTE ---
-        console.log(`Todas as partes recebidas para ${fileName}. Unindo arquivo...`);
-        const finalFilePath = path.join(os.tmpdir(), `merged_${Date.now()}_${fileName}`);
-        
-        const buffers = [];
-        for (let chunkPath of session.chunks) {
-            if (chunkPath && fs.existsSync(chunkPath)) {
-                buffers.push(fs.readFileSync(chunkPath));
-                try { fs.unlinkSync(chunkPath); } catch (e) {}
+                activeSessions[phone] = client;
+            } catch (restoreErr) {
+                console.error("FALHA AO RESTAURAR SESSÃO:", restoreErr);
+                if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
+                return res.status(401).json({ 
+                    success: false, 
+                    message: 'A sessão do Telegram expirou ou é inválida. Por favor, reconecte a conta.' 
+                });
+            }
+        } else {
+            console.log("Utilizando cliente Telegram já ativo na memória.");
+            if (!client.connected) {
+                await client.connect();
             }
         }
-        
-        fs.writeFileSync(finalFilePath, Buffer.concat(buffers));
-        delete chunkUploads[uploadSessionId];
 
-        if (!fs.existsSync(finalFilePath)) {
-            throw new Error('Falha ao gerar o arquivo unificado no disco temporário.');
-        }
+        console.log("Enviando arquivo para o Telegram a partir do caminho temporário...");
 
-        // RESPONDE IMEDIATAMENTE AO NAVEGADOR PARA EVITAR ERRO 502!
-        res.json({
-            success: true,
-            finished: true,
-            messageId: Date.now(), // ID temporário imediato
-            fileId: 'tg_file_' + Date.now()
+        // Usando o caminho real do arquivo em disco (/tmp) para o CustomFile do GramJS
+        const customFile = new CustomFile(file.originalname, file.size, file.path);
+
+        const uploadResult = await client.uploadFile({
+            file: customFile,
+            workers: 4, // 4 workers para máxima velocidade em arquivos grandes
         });
 
-        // --- ENVIO PARA O TELEGRAM EM SEGUNDO PLANO (BACKGROUND) ---
-        setImmediate(async () => {
+        let target = channelId;
+        if (target && String(target).startsWith('-100')) {
             try {
-                let client = activeSessions[phone];
-                if (!client) {
-                    const stringSession = new StringSession(sessionString);
-                    client = new TelegramClient(stringSession, Number(apiId), apiHash, { 
-                        connectionRetries: 5, 
-                        useWSS: false,
-                        timeout: 60000 
-                    });
-                    await client.connect();
-                    activeSessions[phone] = client;
-                } else if (!client.connected) {
-                    await client.connect();
-                }
-
-                console.log(`[Background] Enviando ${fileName} para o Telegram...`);
-                const customFile = new CustomFile(fileName, Number(fileSize), finalFilePath);
-                
-                const uploadResult = await client.uploadFile({ 
-                    file: customFile, 
-                    workers: 1
-                });
-
-                let target = channelId;
-                if (target && String(target).startsWith('-100')) {
-                    try { target = await client.getEntity(Number(target)); } catch (e) {}
-                }
-
-                await client.sendFile(target || 'me', {
-                    file: uploadResult,
-                    caption: `📦 MNDRIVE UPLOAD: ${fileName}`,
-                });
-
-                console.log(`[Background] Arquivo ${fileName} enviado com sucesso para o Telegram!`);
-            } catch (bgErr) {
-                console.error('[Background Error] Falha ao enviar para o Telegram:', bgErr);
-            } finally {
-                if (fs.existsSync(finalFilePath)) {
-                    try { fs.unlinkSync(finalFilePath); } catch (e) {}
-                }
+                target = await client.getEntity(Number(target));
+            } catch (e) {
+                console.warn("Não foi possível buscar a entidade pelo ID numérico, usando ID direto.");
             }
+        }
+
+        const message = await client.sendFile(target || 'me', {
+            file: uploadResult,
+            caption: `📦 MNDRIVE UPLOAD: ${file.originalname}`,
+        });
+
+        // Limpa o arquivo temporário do disco do Railway após o envio
+        if (file.path && fs.existsSync(file.path)) {
+            fs.unlinkSync(file.path);
+        }
+
+        let fileId = message.media && message.media.document ? message.media.document.id.toString() : 'tg_file_' + Date.now();
+
+        console.log("Upload concluído com sucesso no Telegram e arquivo temporário limpo!");
+        res.json({
+            success: true,
+            messageId: message.id,
+            fileId: fileId
         });
 
     } catch (err) {
-        console.error('ERRO CRÍTICO NO UPLOAD POR PARTES:', err);
-        if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
-            try { fs.unlinkSync(uploadedFilePath); } catch (e) {}
+        console.error('ERRO DETALHADO NO UPLOAD:', err);
+        
+        // Garante a remoção do arquivo temporário mesmo em caso de falha
+        if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+            try { fs.unlinkSync(req.file.path); } catch (e) {}
         }
-        if (!res.headersSent) {
-            return res.status(500).json({ success: false, message: err.message || 'Erro interno no servidor' });
+
+        if (err.errorMessage === 'AUTH_KEY_UNREGISTERED' && req.body.phone) {
+            delete activeSessions[req.body.phone];
         }
+
+        res.status(500).json({ success: false, message: err.message || 'Erro interno no servidor' });
     }
 });
 
+// 4. Rota para apagar arquivo do Telegram (baseado no messageId)
 app.post('/api/delete-file', async (req, res) => {
     try {
+        console.log("Recebendo requisição para apagar arquivo...");
         const { phone, channelId, apiId, apiHash, sessionString, messageId } = req.body;
+
         if (!messageId || !phone) {
-            return res.status(400).json({ success: false, message: 'Parâmetros insuficientes.' });
+            return res.status(400).json({ success: false, message: 'Parâmetros insuficientes para exclusão.' });
         }
 
         let client = activeSessions[phone];
+        
         if (!client) {
-            if (!sessionString || sessionString === 'undefined') {
+            console.log("Restaurando sessão do Telegram para exclusão...");
+            if (!sessionString || sessionString.trim() === '' || sessionString === 'undefined') {
                 return res.status(401).json({ success: false, message: 'Sessão inválida.' });
             }
+
             const stringSession = new StringSession(sessionString);
-            client = new TelegramClient(stringSession, Number(apiId), apiHash, { connectionRetries: 5, useWSS: false });
+            client = new TelegramClient(stringSession, Number(apiId), apiHash, { 
+                connectionRetries: 5,
+                useWSS: false
+            });
             await client.connect();
             activeSessions[phone] = client;
-        } else if (!client.connected) {
-            await client.connect();
+        } else {
+            if (!client.connected) {
+                await client.connect();
+            }
         }
 
         let target = channelId;
         if (target && String(target).startsWith('-100')) {
-            try { target = await client.getEntity(Number(target)); } catch (e) {}
+            try {
+                target = await client.getEntity(Number(target));
+            } catch (e) {
+                console.warn("Usando target direto.");
+            }
         }
 
+        // Apaga a mensagem correspondente no canal do Telegram
         await client.deleteMessages(target || 'me', [Number(messageId)], { revoke: true });
-        res.json({ success: true, message: 'Apagado com sucesso.' });
+
+        console.log(`Mensagem ${messageId} apagada com sucesso do Telegram!`);
+        res.json({ success: true, message: 'Arquivo apagado do Telegram com sucesso.' });
+
     } catch (err) {
-        console.error('ERRO AO APAGAR:', err);
-        res.status(500).json({ success: false, message: err.message });
+        console.error('ERRO DETALHADO AO APAGAR:', err);
+        res.status(500).json({ success: false, message: err.message || 'Erro interno ao apagar' });
     }
 });
 
+// Inicialização do Servidor Express
 const PORT = process.env.PORT || 3000;
-const server = app.listen(PORT, () => {
+app.listen(PORT, () => {
     console.log(`MNDRIVE API a executar na porta ${PORT}`);
 });
-
-server.timeout = 1800000;
-server.keepAliveTimeout = 60000;
