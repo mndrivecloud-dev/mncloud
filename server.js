@@ -51,14 +51,17 @@ app.post('/api/auth/send-code', async (req, res) => {
     }
 });
 
-// 2. Confirmar o código de login e verificar/criar o canal "MNDRIVE CLOUD"
+// Adicione um mapa global de sessões ativas no topo do server.js (junto com o pendingLogins)
+const activeSessions = {};
+
+// 2. Na rota de sign-in, salve a sessão ativa:
 app.post('/api/auth/sign-in', async (req, res) => {
     try {
         const { apiId, apiHash, phone, code, phoneCodeHash } = req.body;
         const pending = pendingLogins[phone];
 
         if (!pending) {
-            return res.status(400).json({ success: false, message: 'Sessão expirada ou telefone não encontrado. Peça o código novamente.' });
+            return res.status(400).json({ success: false, message: 'Sessão expirada.' });
         }
 
         const client = pending.client;
@@ -72,56 +75,26 @@ app.post('/api/auth/sign-in', async (req, res) => {
         );
 
         const sessionString = client.session.save();
-        const me = await client.getMe();
-
-        let targetChannel = null;
-        const dialogs = await client.getDialogs({});
         
-        for (const dialog of dialogs) {
-            if (dialog.isChannel && dialog.title === 'MNDRIVE CLOUD') {
-                targetChannel = dialog.entity;
-                break;
-            }
-        }
+        // SALVA O CLIENTE AUTENTICADO NA MEMÓRIA PARA USO NO UPLOAD
+        activeSessions[phone] = client;
 
-        if (!targetChannel) {
-            try {
-                const result = await client.invoke(
-                    new Api.channels.CreateChannel({
-                        title: 'MNDRIVE CLOUD',
-                        about: 'Repositório oficial gerido pelo MNDRIVE Quantum Cloud.',
-                        megagroup: false,
-                    })
-                );
-                targetChannel = result.chats[0];
-            } catch (createErr) {
-                console.error('Erro ao criar o canal automaticamente:', createErr);
-            }
-        }
-
-        let chatId = targetChannel ? (targetChannel.id.toString().startsWith('-100') ? targetChannel.id.toString() : `-100${targetChannel.id}`) : me.id;
-
-        delete pendingLogins[phone];
+        const me = await client.getMe();
+        // ... (resto da lógica de canal) ...
 
         res.json({
             success: true,
             sessionString,
             chatId,
             channelName: 'MNDRIVE CLOUD',
-            user: {
-                id: me.id,
-                username: me.username,
-                phone: me.phone
-            }
+            user: { id: me.id, username: me.username, phone: me.phone }
         });
-
     } catch (err) {
-        console.error('Erro ao autenticar código:', err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
 
-// 3. Rota de Upload de Ficheiros enviando diretamente para o Telegram
+// 3. Rota de Upload corrigida usando a sessão ativa do usuário
 app.post('/api/upload', upload.single('file'), async (req, res) => {
     try {
         const { phone, channelId, apiId, apiHash } = req.body;
@@ -131,37 +104,28 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             return res.status(400).json({ success: false, message: 'Nenhum arquivo enviado.' });
         }
 
-        // Reconecta o cliente Telegram usando a sessão temporária baseada nas credenciais fornecidas
-        const client = new TelegramClient(new StringSession(''), Number(apiId), apiHash, {
-            connectionRetries: 5,
-        });
+        // Pega o cliente já logado ou reconecta se necessário
+        let client = activeSessions[phone];
+        if (!client) {
+            client = new TelegramClient(new StringSession(''), Number(apiId), apiHash, { connectionRetries: 5 });
+            await client.connect();
+            activeSessions[phone] = client;
+        }
 
-        await client.connect();
-
-        // Prepara o arquivo binário para upload no Telegram via GramJS
         const customFile = new CustomFile(file.originalname, file.size, '', file.buffer);
-        const uploadedFile = await client.uploadFile(customFile, {
-            workers: 2,
-        });
+        const uploadedFile = await client.uploadFile(customFile, { workers: 2 });
 
-        // Define o destino (canal MNDRIVE CLOUD ou Chat ID informado)
         let target = channelId;
         if (target && target.startsWith('-100')) {
             target = await client.getEntity(Number(target));
         }
 
-        // Envia o arquivo como documento ou mídia para o Telegram
         const message = await client.sendFile(target || 'me', {
             file: uploadedFile,
             caption: `📦 MNDRIVE UPLOAD: ${file.originalname}`,
         });
 
-        let fileId = 'tg_file_' + Date.now();
-        if (message.media && message.media.document) {
-            fileId = message.media.document.id.toString();
-        } else if (message.media && message.media.photo) {
-            fileId = message.media.photo.id.toString();
-        }
+        let fileId = message.media && message.media.document ? message.media.document.id.toString() : 'tg_file_' + Date.now();
 
         res.json({
             success: true,
@@ -174,7 +138,6 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         res.status(500).json({ success: false, message: err.message });
     }
 });
-
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`MNDRIVE API a executar na porta ${PORT}`);
