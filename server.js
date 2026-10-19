@@ -24,21 +24,26 @@ const MAX_PARTS_PREMIUM = 8000;          // ~4 GB (Telegram Premium)
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 // Identificação do dispositivo mostrada em "Dispositivos" no Telegram.
-// Usa o user-agent real do navegador do usuário (enviado pelo frontend).
 function deviceFor(userAgent) {
     const ua = String(userAgent || DEFAULT_UA).slice(0, 250);
 
-    // Mostra o user-agent como o TeleDrive ("5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)").
-    // Os trechos finais com nome do navegador (Chrome/..., Safari/...) são removidos porque
-    // o Telegram os usa para trocar o ícone do Windows pelo globo roxo de "navegador".
+    // 1. Remove o "Mozilla/" inicial
+    // 2. Troca "Android" por "Desktop" para evitar que o Telegram identifique como celular
+    // 3. Remove as versões específicas de navegadores (Chrome, Safari, etc) para evitar o ícone de "globo"
     const systemVersion = ua
-        .replace(/^Mozilla\//, '')
+        .replace(/^Mozilla\//, '') 
+        .replace(/Android/g, 'Desktop') 
         .replace(/\s*(Chrome|Chromium|Safari|Edg|Edge|OPR|Firefox|Version|CriOS|FxiOS)\/[\d.]+/g, '')
         .trim();
 
+    // Para garantir que comece com "Desktop, 5.0...", verificamos se a string já começa com Desktop
+    const finalVersion = systemVersion.startsWith('Desktop') 
+        ? systemVersion 
+        : `Desktop, ${systemVersion}`;
+
     return {
-        deviceModel: 'Browser',
-        systemVersion,
+        deviceModel: 'Browser', // Aparece como: ..., Browser, ...
+        systemVersion: finalVersion, // Aparece como: ..., Desktop, 5.0...
         appVersion: '1.0',
         langCode: 'pt-br',
         systemLangCode: 'pt-br',
@@ -93,7 +98,7 @@ async function resolveTarget(client, channelId) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Envia o arquivo do disco para o Telegram em streaming (nunca carrega o arquivo inteiro na RAM)
+// Envia o arquivo do disco para o Telegram em streaming
 async function uploadFileToTelegram(client, filePath, fileName, size, onProgress) {
     const me = await client.getMe();
     const totalParts = Math.ceil(size / TG_PART_SIZE);
@@ -272,10 +277,6 @@ app.post('/api/auth/sign-in', async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // 3. Upload em partes
-//    init  -> cria o arquivo temporário e devolve uploadId + chunkSize
-//    chunk -> grava cada parte na posição certa do arquivo (pode repetir sem problema)
-//    finish-> inicia o envio ao Telegram em segundo plano
-//    status-> o navegador consulta o andamento
 // ---------------------------------------------------------------------------
 app.post('/api/upload/init', (req, res) => {
     try {
@@ -313,7 +314,7 @@ app.post(
     async (req, res) => {
         try {
             const u = uploads[req.query.uploadId];
-            if (!u) return res.status(404).json({ success: false, message: 'Upload não encontrado (o servidor pode ter reiniciado).' });
+            if (!u) return res.status(404).json({ success: false, message: 'Upload não encontrado.' });
 
             const index = Number(req.query.index);
             if (!Number.isInteger(index) || index < 0 || index >= u.totalChunks) {
@@ -355,7 +356,6 @@ app.post('/api/upload/finish', (req, res) => {
     u.state = 'sending';
     res.status(202).json({ success: true, state: 'sending' });
 
-    // Segundo plano: o navegador acompanha por /status
     (async () => {
         try {
             const client = await getClient(u);
