@@ -21,6 +21,14 @@ const TG_WORKERS = 4;                    // partes enviadas em paralelo ao Teleg
 const MAX_PARTS_FREE = 4000;             // ~2 GB (conta normal)
 const MAX_PARTS_PREMIUM = 8000;          // ~4 GB (Telegram Premium)
 
+const TG_DEVICE = {
+    deviceModel: 'Chrome',          // nome que aparece em "Dispositivos" no Telegram
+    systemVersion: 'Web',           // aparece como plataforma/sistema
+    appVersion: '1.0.0 Z',
+    langCode: 'pt-br',
+    systemLangCode: 'pt-br',
+};
+
 const pendingLogins = {};
 const activeSessions = {};
 const uploads = {};                      // uploadId -> estado do upload
@@ -46,6 +54,7 @@ async function getClient({ phone, apiId, apiHash, sessionString }) {
     client = new TelegramClient(new StringSession(sessionString), Number(apiId), apiHash, {
         connectionRetries: 5,
         useWSS: false,
+        ...TG_DEVICE,
     });
     await client.connect();
     await client.getMe(); // valida a sessão
@@ -156,6 +165,7 @@ app.post('/api/auth/send-code', async (req, res) => {
 
         const client = new TelegramClient(new StringSession(''), Number(apiId), apiHash, {
             connectionRetries: 5,
+            ...TG_DEVICE,
         });
         await client.connect();
 
