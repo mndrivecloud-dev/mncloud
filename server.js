@@ -23,13 +23,16 @@ const MAX_PARTS_PREMIUM = 8000;          // ~4 GB (Telegram Premium)
 
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
+// langPack enviado no InitConnection (MTProto). É ele que define a plataforma
+// mostrada em "Dispositivos" no Telegram. Pode ser trocado pela variável de
+// ambiente LANG_PACK no Railway para testar ('tdesktop', 'weba', 'webk', 'macos'...).
+const LANG_PACK = process.env.LANG_PACK || 'tdesktop';
+
 // Identificação do dispositivo mostrada em "Dispositivos" no Telegram.
-// Usa o user-agent real do navegador do usuário (enviado pelo frontend).
 function deviceFor(userAgent) {
     const ua = String(userAgent || DEFAULT_UA).slice(0, 250);
 
-    // Mostra o user-agent como o TeleDrive ("5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)").
-    // Os trechos finais com nome do navegador (Chrome/..., Safari/...) são removidos porque
+    // Remove os trechos com nome do navegador (Chrome/..., Safari/...) porque
     // o Telegram os usa para trocar o ícone do Windows pelo globo roxo de "navegador".
     const systemVersion = ua
         .replace(/^Mozilla\//, '')
@@ -45,6 +48,28 @@ function deviceFor(userAgent) {
     };
 }
 
+// Cria o cliente MTProto já com o langPack correto no InitConnection.
+// O GramJS fixa langPack = "" no construtor (e o Telegram então mostra "Android"),
+// por isso alteramos o _initRequest antes de conectar.
+function createClient(sessionString, apiId, apiHash, userAgent, extra = {}) {
+    const client = new TelegramClient(
+        new StringSession(sessionString || ''),
+        Number(apiId),
+        apiHash,
+        {
+            connectionRetries: 5,
+            ...extra,
+            ...deviceFor(userAgent),
+        }
+    );
+
+    if (client._initRequest) {
+        client._initRequest.langPack = LANG_PACK;
+    } else {
+        console.warn('Aviso: _initRequest não encontrado nesta versão do GramJS; langPack não aplicado.');
+    }
+    return client;
+}
 
 const pendingLogins = {};
 const activeSessions = {};
@@ -68,11 +93,7 @@ async function getClient({ phone, apiId, apiHash, sessionString, userAgent }) {
         e.status = 401;
         throw e;
     }
-    client = new TelegramClient(new StringSession(sessionString), Number(apiId), apiHash, {
-        connectionRetries: 5,
-        useWSS: false,
-        ...deviceFor(userAgent),
-    });
+    client = createClient(sessionString, apiId, apiHash, userAgent, { useWSS: false });
     await client.connect();
     await client.getMe(); // valida a sessão
     activeSessions[phone] = client;
@@ -180,10 +201,7 @@ app.post('/api/auth/send-code', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Parâmetros incompletos.' });
         }
 
-        const client = new TelegramClient(new StringSession(''), Number(apiId), apiHash, {
-            connectionRetries: 5,
-            ...deviceFor(userAgent),
-        });
+        const client = createClient('', apiId, apiHash, userAgent);
         await client.connect();
 
         const sendCodeResult = await client.invoke(
@@ -429,5 +447,5 @@ app.post('/api/delete-file', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`MNDRIVE API a executar na porta ${PORT}`);
+    console.log(`MNDRIVE API a executar na porta ${PORT} (langPack: ${LANG_PACK})`);
 });
