@@ -27,14 +27,21 @@ const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 function deviceFor(userAgent) {
     const ua = String(userAgent || DEFAULT_UA);
 
-    // O Telegram escolhe o ícone pelo systemVersion; usamos nomes limpos de SO,
-    // sem nenhuma palavra de navegador (Chrome, Safari, WebKit, Gecko...).
-    let systemVersion = 'Windows 10 x64';
-    if (/Windows/i.test(ua)) systemVersion = 'Windows 10 x64';
-    else if (/Android/i.test(ua)) systemVersion = 'Android';
-    else if (/iPhone|iPad|iOS/i.test(ua)) systemVersion = 'iOS';
-    else if (/Mac OS X|Macintosh/i.test(ua)) systemVersion = 'macOS';
-    else if (/Linux|X11/i.test(ua)) systemVersion = 'Linux';
+    // Mostra o user-agent real ("5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)").
+    // Remove os trechos com nome do navegador (Chrome/..., Safari/...) e insere um
+    // caractere invisível (zero-width space) dentro das palavras que o Telegram
+    // usa para detectar "navegador" (Web, Apple, KHTML, Gecko). O texto aparece igual
+    // para o usuário, mas o Telegram não reconhece a palavra e mantém o ícone do Windows.
+    const ZW = '\u200B';
+    const systemVersion = ua
+        .replace(/^Mozilla\//, '')
+        .replace(/\s*(Chrome|Chromium|Safari|Edg|Edge|OPR|Firefox|Version|CriOS|FxiOS)\/[\d.]+/g, '')
+        .replace(/Web/g, `W${ZW}eb`)
+        .replace(/Apple/g, `A${ZW}pple`)
+        .replace(/KHTML/g, `K${ZW}HTML`)
+        .replace(/Gecko/g, `G${ZW}ecko`)
+        .trim()
+        .slice(0, 250);
 
     return {
         deviceModel: 'Browser',
