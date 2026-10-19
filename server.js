@@ -24,17 +24,17 @@ const MAX_PARTS_PREMIUM = 8000;          // ~4 GB (Telegram Premium)
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 // Identificação do dispositivo mostrada em "Dispositivos" no Telegram.
-// Usa o user-agent real do navegador do usuário (enviado pelo frontend).
 function deviceFor(userAgent) {
-    const ua = String(userAgent || DEFAULT_UA).slice(0, 250);
+    const ua = String(userAgent || DEFAULT_UA);
 
-    // Mostra o user-agent como o TeleDrive ("5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)").
-    // Os trechos finais com nome do navegador (Chrome/..., Safari/...) são removidos porque
-    // o Telegram os usa para trocar o ícone do Windows pelo globo roxo de "navegador".
-    const systemVersion = ua
-        .replace(/^Mozilla\//, '')
-        .replace(/\s*(Chrome|Chromium|Safari|Edg|Edge|OPR|Firefox|Version|CriOS|FxiOS)\/[\d.]+/g, '')
-        .trim();
+    // O Telegram escolhe o ícone pelo systemVersion; usamos nomes limpos de SO,
+    // sem nenhuma palavra de navegador (Chrome, Safari, WebKit, Gecko...).
+    let systemVersion = 'Windows 10 x64';
+    if (/Windows/i.test(ua)) systemVersion = 'Windows 10 x64';
+    else if (/Android/i.test(ua)) systemVersion = 'Android';
+    else if (/iPhone|iPad|iOS/i.test(ua)) systemVersion = 'iOS';
+    else if (/Mac OS X|Macintosh/i.test(ua)) systemVersion = 'macOS';
+    else if (/Linux|X11/i.test(ua)) systemVersion = 'Linux';
 
     return {
         deviceModel: 'Browser',
