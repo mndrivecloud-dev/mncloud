@@ -42,6 +42,14 @@ function deviceFor(userAgent) {
 }
 
 
+// O Telegram decide o rótulo da plataforma ("Android", "Desktop"...) pelo langPack
+// enviado no initConnection. O GramJS manda vazio e o Telegram assume "Android".
+// Com 'tdesktop' ele mostra "Desktop" (e o ícone do Windows).
+function asDesktop(client) {
+    if (client && client._initRequest) client._initRequest.langPack = 'tdesktop';
+    return client;
+}
+
 const pendingLogins = {};
 const activeSessions = {};
 const uploads = {};                      // uploadId -> estado do upload
@@ -69,6 +77,7 @@ async function getClient({ phone, apiId, apiHash, sessionString, userAgent }) {
         useWSS: false,
         ...deviceFor(userAgent),
     });
+    asDesktop(client);
     await client.connect();
     await client.getMe(); // valida a sessão
     activeSessions[phone] = client;
@@ -180,6 +189,7 @@ app.post('/api/auth/send-code', async (req, res) => {
             connectionRetries: 5,
             ...deviceFor(userAgent),
         });
+        asDesktop(client);
         await client.connect();
 
         const sendCodeResult = await client.invoke(
