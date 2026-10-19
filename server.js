@@ -21,35 +21,20 @@ const TG_WORKERS = 4;                    // partes enviadas em paralelo ao Teleg
 const MAX_PARTS_FREE = 4000;             // ~2 GB (conta normal)
 const MAX_PARTS_PREMIUM = 8000;          // ~4 GB (Telegram Premium)
 
-const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-
-// Identificação do dispositivo mostrada em "Dispositivos" no Telegram.
+// ---------------------------------------------------------------------------
+// Identificação do Dispositivo (FORÇADO PARA DESKTOP)
+// ---------------------------------------------------------------------------
 function deviceFor(userAgent) {
-    const ua = String(userAgent || DEFAULT_UA).slice(0, 250);
-
-    // 1. Remove o "Mozilla/" inicial
-    // 2. Troca "Android" por "Desktop" para evitar que o Telegram identifique como celular
-    // 3. Remove as versões específicas de navegadores (Chrome, Safari, etc) para evitar o ícone de "globo"
-    const systemVersion = ua
-        .replace(/^Mozilla\//, '') 
-        .replace(/Android/g, 'Desktop') 
-        .replace(/\s*(Chrome|Chromium|Safari|Edg|Edge|OPR|Firefox|Version|CriOS|FxiOS)\/[\d.]+/g, '')
-        .trim();
-
-    // Para garantir que comece com "Desktop, 5.0...", verificamos se a string já começa com Desktop
-    const finalVersion = systemVersion.startsWith('Desktop') 
-        ? systemVersion 
-        : `Desktop, ${systemVersion}`;
-
+    // Ignoramos o userAgent enviado e forçamos a string exata que você deseja.
+    // Isso evita que a palavra "Android" apareça independente do dispositivo do usuário.
     return {
-        deviceModel: 'Browser', // Aparece como: ..., Browser, ...
-        systemVersion: finalVersion, // Aparece como: ..., Desktop, 5.0...
+        deviceModel: 'Browser', 
+        systemVersion: 'Desktop, 5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)', 
         appVersion: '1.0',
         langCode: 'pt-br',
         systemLangCode: 'pt-br',
     };
 }
-
 
 const pendingLogins = {};
 const activeSessions = {};
@@ -164,7 +149,6 @@ function removeTemp(u) {
     }
 }
 
-// Limpa uploads abandonados (> 6 horas)
 setInterval(() => {
     const limit = Date.now() - 6 * 60 * 60 * 1000;
     for (const id of Object.keys(uploads)) {
