@@ -736,6 +736,7 @@ app.get('/api/upload/status/:uploadId', (req, res) => {
 // Aceita messageId ou messageIds.
 // ---------------------------------------------------------------------------
 
+
 app.post('/api/delete-file', async (req, res) => {
     try {
         const {
@@ -746,19 +747,32 @@ app.post('/api/delete-file', async (req, res) => {
             sessionString,
             messageId,
             messageIds,
-            userAgent,
+            userAgent
         } = req.body;
 
-        const ids = Array.isArray(messageIds)
-            ? messageIds
-            : messageId
-                ? [messageId]
-                : [];
-
-        if (!phone || ids.length === 0) {
+        if (!phone) {
             return res.status(400).json({
                 success: false,
-                message: 'Parâmetros insuficientes para exclusão.',
+                message: 'Número de telefone não informado.'
+            });
+        }
+
+        // Aceita vários IDs e mantém compatibilidade com arquivos antigos.
+        const idsRecebidos = [
+            ...(Array.isArray(messageIds) ? messageIds : []),
+            ...(messageId != null ? [messageId] : [])
+        ];
+
+        const ids = [...new Set(
+            idsRecebidos
+                .map(id => Number(id))
+                .filter(id => Number.isSafeInteger(id) && id > 0)
+        )];
+
+        if (ids.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Nenhum ID válido de mensagem foi informado.'
             });
         }
 
@@ -767,30 +781,38 @@ app.post('/api/delete-file', async (req, res) => {
             apiId,
             apiHash,
             sessionString,
-            userAgent,
+            userAgent
         });
 
         const target = await resolveTarget(client, channelId);
 
-        await client.deleteMessages(
-            target,
-            ids.map(Number),
-            { revoke: true }
+        // Exclui todas as partes do arquivo no Telegram.
+        await client.deleteMessages(target, ids, {
+            revoke: true
+        });
+
+        console.log(
+            `Exclusão concluída: ${ids.length} mensagem(ns) do Telegram.`,
+            ids
         );
 
-        res.json({
+        return res.json({
             success: true,
-            message: 'Arquivo(s) apagado(s) do Telegram com sucesso.',
+            deletedCount: ids.length,
+            deletedMessageIds: ids,
+            message: `${ids.length} mensagem(ns) enviada(s) para exclusão no Telegram.`
         });
-    } catch (err) {
-        console.error('ERRO AO APAGAR:', err);
 
-        res.status(err.status || 500).json({
+    } catch (err) {
+        console.error('ERRO AO APAGAR MENSAGENS DO TELEGRAM:', err);
+
+        return res.status(err.status || 500).json({
             success: false,
-            message: err.message || 'Erro interno ao apagar',
+            message: err.message || 'Erro interno ao apagar mensagens.'
         });
     }
 });
+
 
 // ---------------------------------------------------------------------------
 // INICIAR SERVIDOR
