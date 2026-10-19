@@ -839,7 +839,37 @@ app.post('/api/delete-file', async (req, res) => {
     }
 });
 
+// ---------------------------------------------------------------------------
+// 8. CANCELAR UPLOAD IMEDIATAMENTE
+// ---------------------------------------------------------------------------
 
+app.post('/api/upload/cancel', (req, res) => {
+    const { uploadId } = req.body;
+    const u = uploads[uploadId];
+
+    if (!u) {
+        return res.status(404).json({
+            success: false,
+            message: 'Upload não encontrado ou já finalizado.',
+        });
+    }
+
+    // Marca o estado como cancelado para interromper os workers
+    u.state = 'canceled';
+
+    // Remove o arquivo temporário do disco imediatamente
+    removeTemp(u);
+
+    // Remove da lista de uploads ativos
+    delete uploads[uploadId];
+
+    console.log(`Upload ${uploadId} cancelado pelo usuário.`);
+
+    return res.json({
+        success: true,
+        message: 'Upload cancelado com sucesso.',
+    });
+});
 
 // ---------------------------------------------------------------------------
 // INICIAR SERVIDOR
