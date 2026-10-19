@@ -18,8 +18,8 @@ app.use(express.json({ limit: '1mb' }));
 const CHUNK_SIZE = 8 * 1024 * 1024;      // partes que o navegador envia ao Railway (8 MB)
 const TG_PART_SIZE = 512 * 1024;         // tamanho de parte do Telegram (máximo para arquivos grandes)
 const TG_WORKERS = 4;                    // partes enviadas em paralelo ao Telegram
-const MAX_PARTS_FREE = 4000;             // ~2 GB (conta normal)
-const MAX_PARTS_PREMIUM = 8000;          // ~4 GB (Telegram Premium)
+const MAX_PARTS_FREE = 8000;             // ~2 GB (conta normal)
+const MAX_PARTS_PREMIUM = 12000;          // ~4 GB (Telegram Premium)
 
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
