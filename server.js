@@ -21,13 +21,21 @@ const TG_WORKERS = 4;                    // partes enviadas em paralelo ao Teleg
 const MAX_PARTS_FREE = 4000;             // ~2 GB (conta normal)
 const MAX_PARTS_PREMIUM = 8000;          // ~4 GB (Telegram Premium)
 
-const TG_DEVICE = {
-    deviceModel: 'Chrome',          // nome que aparece em "Dispositivos" no Telegram
-    systemVersion: 'Web',           // aparece como plataforma/sistema
-    appVersion: '1.0.0 Z',
-    langCode: 'pt-br',
-    systemLangCode: 'pt-br',
-};
+const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+// Identificação do dispositivo mostrada em "Dispositivos" no Telegram.
+// Usa o user-agent real do navegador do usuário (enviado pelo frontend).
+function deviceFor(userAgent) {
+    const ua = String(userAgent || DEFAULT_UA).slice(0, 250);
+    return {
+        deviceModel: 'Browser',
+        systemVersion: ua.replace(/^Mozilla\//, ''),
+        appVersion: '1.0',
+        langCode: 'pt-br',
+        systemLangCode: 'pt-br',
+    };
+}
+
 
 const pendingLogins = {};
 const activeSessions = {};
@@ -40,7 +48,7 @@ app.get('/', (req, res) => {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-async function getClient({ phone, apiId, apiHash, sessionString }) {
+async function getClient({ phone, apiId, apiHash, sessionString, userAgent }) {
     let client = activeSessions[phone];
     if (client) {
         if (!client.connected) await client.connect();
@@ -54,7 +62,7 @@ async function getClient({ phone, apiId, apiHash, sessionString }) {
     client = new TelegramClient(new StringSession(sessionString), Number(apiId), apiHash, {
         connectionRetries: 5,
         useWSS: false,
-        ...TG_DEVICE,
+        ...deviceFor(userAgent),
     });
     await client.connect();
     await client.getMe(); // valida a sessão
@@ -158,14 +166,14 @@ setInterval(() => {
 // ---------------------------------------------------------------------------
 app.post('/api/auth/send-code', async (req, res) => {
     try {
-        const { apiId, apiHash, phone } = req.body;
+        const { apiId, apiHash, phone, userAgent } = req.body;
         if (!apiId || !apiHash || !phone) {
             return res.status(400).json({ success: false, message: 'Parâmetros incompletos.' });
         }
 
         const client = new TelegramClient(new StringSession(''), Number(apiId), apiHash, {
             connectionRetries: 5,
-            ...TG_DEVICE,
+            ...deviceFor(userAgent),
         });
         await client.connect();
 
@@ -262,7 +270,7 @@ app.post('/api/auth/sign-in', async (req, res) => {
 // ---------------------------------------------------------------------------
 app.post('/api/upload/init', (req, res) => {
     try {
-        const { phone, channelId, apiId, apiHash, sessionString, fileName, fileSize } = req.body;
+        const { phone, channelId, apiId, apiHash, sessionString, fileName, fileSize, userAgent } = req.body;
         if (!phone || !fileName || !fileSize) {
             return res.status(400).json({ success: false, message: 'Parâmetros incompletos.' });
         }
@@ -274,7 +282,7 @@ app.post('/api/upload/init', (req, res) => {
         uploads[uploadId] = {
             createdAt: Date.now(),
             path: tmpPath,
-            phone, channelId, apiId, apiHash, sessionString,
+            phone, channelId, apiId, apiHash, sessionString, userAgent,
             fileName: String(fileName),
             fileSize: Number(fileSize),
             totalChunks: Math.ceil(Number(fileSize) / CHUNK_SIZE),
@@ -394,12 +402,12 @@ app.get('/api/upload/status/:uploadId', (req, res) => {
 // ---------------------------------------------------------------------------
 app.post('/api/delete-file', async (req, res) => {
     try {
-        const { phone, channelId, apiId, apiHash, sessionString, messageId } = req.body;
+        const { phone, channelId, apiId, apiHash, sessionString, messageId, userAgent } = req.body;
         if (!messageId || !phone) {
             return res.status(400).json({ success: false, message: 'Parâmetros insuficientes para exclusão.' });
         }
 
-        const client = await getClient({ phone, apiId, apiHash, sessionString });
+        const client = await getClient({ phone, apiId, apiHash, sessionString, userAgent });
         const target = await resolveTarget(client, channelId);
 
         await client.deleteMessages(target, [Number(messageId)], { revoke: true });
