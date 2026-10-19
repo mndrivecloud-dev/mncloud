@@ -27,9 +27,21 @@ const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 // Usa o user-agent real do navegador do usuário (enviado pelo frontend).
 function deviceFor(userAgent) {
     const ua = String(userAgent || DEFAULT_UA).slice(0, 250);
+
+    // O Telegram escolhe o ícone (Windows azul, globo roxo...) a partir destes textos.
+    // Aqui o sistema é informado de forma simples ("Windows 10") para ser reconhecido.
+    let systemVersion = ua.replace(/^Mozilla\//, '');
+    if (/Windows NT 10\.0/.test(ua)) systemVersion = 'Windows 10';
+    else if (/Windows NT 6\.3/.test(ua)) systemVersion = 'Windows 8.1';
+    else if (/Windows/.test(ua)) systemVersion = 'Windows';
+    else if (/Android/.test(ua)) systemVersion = 'Android';
+    else if (/iPhone|iPad|iOS/.test(ua)) systemVersion = 'iOS';
+    else if (/Mac OS X|Macintosh/.test(ua)) systemVersion = 'macOS';
+    else if (/Linux/.test(ua)) systemVersion = 'Linux';
+
     return {
         deviceModel: 'Browser',
-        systemVersion: ua.replace(/^Mozilla\//, ''),
+        systemVersion,
         appVersion: '1.0',
         langCode: 'pt-br',
         systemLangCode: 'pt-br',
