@@ -46,18 +46,26 @@ function deviceFor(userAgent) {
 // enviado no initConnection. O GramJS manda vazio e o Telegram assume "Android".
 // Com 'tdesktop' ele mostra "Desktop" (e o ícone do Windows).
 function asDesktop(client) {
-    if (client && client._initRequest) client._initRequest.langPack = 'tdesktop';
+    if (!client) return client;
+
+    // Caso a versão do GramJS guarde o initConnection pronto
+    if (client._initRequest) client._initRequest.langPack = 'tdesktop';
+
+    // Caso a versão monte o initConnection a cada conexão (_initWith)
+    if (typeof client._initWith === 'function' && !client._initWithPatched) {
+        const original = client._initWith.bind(client);
+        client._initWith = (query) => {
+            const req = original(query);
+            // req = InvokeWithLayer; req.query = InitConnection
+            if (req && req.query && 'langPack' in req.query) {
+                req.query.langPack = 'tdesktop';
+            }
+            return req;
+        };
+        client._initWithPatched = true;
+    }
     return client;
 }
-
-const pendingLogins = {};
-const activeSessions = {};
-const uploads = {};                      // uploadId -> estado do upload
-
-app.get('/', (req, res) => {
-    res.json({ success: true, message: 'MNDRIVE API no Railway está online e operando!' });
-});
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
