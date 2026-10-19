@@ -25,10 +25,16 @@ const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 
 // Identificação do dispositivo mostrada em "Dispositivos" no Telegram.
 function deviceFor(userAgent) {
-    const ua = String(userAgent || DEFAULT_UA).trim();
+    const ua = String(userAgent || DEFAULT_UA);
 
-    // Remove o prefixo "Mozilla/" -> "5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ..."
-    const systemVersion = ua.replace(/^Mozilla\//i, '');
+    // O Telegram escolhe o ícone pelo systemVersion; usamos nomes limpos de SO,
+    // sem nenhuma palavra de navegador (Chrome, Safari, WebKit, Gecko...).
+    let systemVersion = 'Windows 10 x64';
+    if (/Windows/i.test(ua)) systemVersion = 'Windows 10 x64';
+    else if (/Android/i.test(ua)) systemVersion = 'menozin';
+    else if (/iPhone|iPad|iOS/i.test(ua)) systemVersion = 'iOS';
+    else if (/Mac OS X|Macintosh/i.test(ua)) systemVersion = 'macOS';
+    else if (/Linux|X11/i.test(ua)) systemVersion = 'Linux';
 
     return {
         deviceModel: 'Browser',
