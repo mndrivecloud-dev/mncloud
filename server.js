@@ -25,12 +25,16 @@ const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 
 // Identificação do dispositivo mostrada em "Dispositivos" no Telegram.
 function deviceFor(userAgent) {
-    const ua = String(userAgent || DEFAULT_UA).slice(0, 250);
+    const ua = String(userAgent || DEFAULT_UA);
 
-    // Mostra o user-agent completo (sem o "Mozilla/" inicial), como o TeleDrive:
-    // "5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/..."
-    // O Telegram corta o texto longo na tela de Dispositivos ("(KHTML,...").
-    const systemVersion = ua.replace(/^Mozilla\//, '').trim();
+    // O Telegram escolhe o ícone pelo systemVersion; usamos nomes limpos de SO,
+    // sem nenhuma palavra de navegador (Chrome, Safari, WebKit, Gecko...).
+    let systemVersion = 'Windows 10 x64';
+    if (/Windows/i.test(ua)) systemVersion = 'Windows 10 x64';
+    else if (/Android/i.test(ua)) systemVersion = 'Android';
+    else if (/iPhone|iPad|iOS/i.test(ua)) systemVersion = 'iOS';
+    else if (/Mac OS X|Macintosh/i.test(ua)) systemVersion = 'macOS';
+    else if (/Linux|X11/i.test(ua)) systemVersion = 'Linux';
 
     return {
         deviceModel: 'Browser',
@@ -42,30 +46,14 @@ function deviceFor(userAgent) {
 }
 
 
-// O Telegram decide o rótulo da plataforma ("Android", "Desktop"...) pelo langPack
-// enviado no initConnection. O GramJS manda vazio e o Telegram assume "Android".
-// Com 'tdesktop' ele mostra "Desktop" (e o ícone do Windows).
-function asDesktop(client) {
-    if (!client) return client;
+const pendingLogins = {};
+const activeSessions = {};
+const uploads = {};                      // uploadId -> estado do upload
 
-    // Caso a versão do GramJS guarde o initConnection pronto
-    if (client._initRequest) client._initRequest.langPack = 'tdesktop';
+app.get('/', (req, res) => {
+    res.json({ success: true, message: 'MNDRIVE API no Railway está online e operando!' });
+});
 
-    // Caso a versão monte o initConnection a cada conexão (_initWith)
-    if (typeof client._initWith === 'function' && !client._initWithPatched) {
-        const original = client._initWith.bind(client);
-        client._initWith = (query) => {
-            const req = original(query);
-            // req = InvokeWithLayer; req.query = InitConnection
-            if (req && req.query && 'langPack' in req.query) {
-                req.query.langPack = 'tdesktop';
-            }
-            return req;
-        };
-        client._initWithPatched = true;
-    }
-    return client;
-}
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -85,7 +73,6 @@ async function getClient({ phone, apiId, apiHash, sessionString, userAgent }) {
         useWSS: false,
         ...deviceFor(userAgent),
     });
-    asDesktop(client);
     await client.connect();
     await client.getMe(); // valida a sessão
     activeSessions[phone] = client;
@@ -197,7 +184,6 @@ app.post('/api/auth/send-code', async (req, res) => {
             connectionRetries: 5,
             ...deviceFor(userAgent),
         });
-        asDesktop(client);
         await client.connect();
 
         const sendCodeResult = await client.invoke(
