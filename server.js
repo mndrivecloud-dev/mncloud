@@ -736,7 +736,6 @@ app.get('/api/upload/status/:uploadId', (req, res) => {
 // Aceita messageId ou messageIds.
 // ---------------------------------------------------------------------------
 
-
 app.post('/api/delete-file', async (req, res) => {
     try {
         const {
@@ -757,7 +756,6 @@ app.post('/api/delete-file', async (req, res) => {
             });
         }
 
-        // Aceita vários IDs e mantém compatibilidade com arquivos antigos.
         const idsRecebidos = [
             ...(Array.isArray(messageIds) ? messageIds : []),
             ...(messageId != null ? [messageId] : [])
@@ -786,25 +784,53 @@ app.post('/api/delete-file', async (req, res) => {
 
         const target = await resolveTarget(client, channelId);
 
-        // Exclui todas as partes do arquivo no Telegram.
-        await client.deleteMessages(target, ids, {
-            revoke: true
+        const deletedMessageIds = [];
+        const failedMessageIds = [];
+
+        for (const id of ids) {
+            try {
+                await client.deleteMessages(target, [id], {
+                    revoke: true
+                });
+
+                deletedMessageIds.push(id);
+            } catch (err) {
+                console.error(
+                    `Falha ao excluir mensagem ${id} no Telegram:`,
+                    err.message
+                );
+
+                failedMessageIds.push({
+                    messageId: id,
+                    error: err.message || 'Falha na exclusão'
+                });
+            }
+        }
+
+        const success = failedMessageIds.length === 0;
+
+        console.log('Resultado da exclusão no Telegram:', {
+            solicitados: ids,
+            excluidos: deletedMessageIds,
+            falhas: failedMessageIds
         });
 
-        console.log(
-            `Exclusão concluída: ${ids.length} mensagem(ns) do Telegram.`,
-            ids
-        );
-
-        return res.json({
-            success: true,
-            deletedCount: ids.length,
-            deletedMessageIds: ids,
-            message: `${ids.length} mensagem(ns) enviada(s) para exclusão no Telegram.`
+        return res.status(success ? 200 : 207).json({
+            success,
+            requestedCount: ids.length,
+            deletedCount: deletedMessageIds.length,
+            deletedMessageIds,
+            failedMessageIds,
+            message: success
+                ? `Solicitada a exclusão de todas as ${ids.length} mensagem(ns).`
+                : `${deletedMessageIds.length} de ${ids.length} mensagem(ns) processada(s). Algumas exclusões falharam.`
         });
 
     } catch (err) {
-        console.error('ERRO AO APAGAR MENSAGENS DO TELEGRAM:', err);
+        console.error(
+            'ERRO AO APAGAR MENSAGENS DO TELEGRAM:',
+            err
+        );
 
         return res.status(err.status || 500).json({
             success: false,
@@ -812,6 +838,7 @@ app.post('/api/delete-file', async (req, res) => {
         });
     }
 });
+
 
 
 // ---------------------------------------------------------------------------
