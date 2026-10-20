@@ -950,6 +950,55 @@ app.post('/api/upload/cancel', (req, res) => {
 
 const downloads = {};
 const DOWNLOAD_REQUEST_SIZE = 1024 * 1024; // 1 MiB por requisição ao Telegram
+const PAUSE_MAX_MS = 10 * 60 * 1000; // pausa longa derruba a conexão: cancela após 10 min
+
+function waitWhilePaused(d, res) {
+    return new Promise((resolve) => {
+        const done = () => {
+            res.off('close', done);
+            d.wake = null;
+            resolve();
+        };
+        d.wake = done;
+        res.once('close', done);
+    });
+}
+
+function cancelDownload(d) {
+    clearTimeout(d.pauseTimer);
+
+    if (d.state === 'ready') {
+        d.state = 'aborted';
+        d.finishedAt = Date.now();
+        d.parts = null;
+        d.client = null;
+        return true;
+    }
+
+    if (d.state === 'streaming') {
+        d.paused = false;
+        if (d.wake) d.wake();
+        if (d.res) d.res.destroy(); // o navegador marca o download como interrompido
+        return true;
+    }
+
+    return false;
+}
+
+function setDownloadPaused(d, paused) {
+    if (d.state !== 'streaming') return false;
+
+    clearTimeout(d.pauseTimer);
+    d.paused = paused;
+
+    if (paused) {
+        d.pauseTimer = setTimeout(() => cancelDownload(d), PAUSE_MAX_MS);
+    } else if (d.wake) {
+        d.wake();
+    }
+
+    return true;
+}
 
 function contentDisposition(name) {
     const clean = String(name || 'arquivo').replace(/[\r\n"\\/]/g, '_');
@@ -975,6 +1024,7 @@ function waitDrainOrClose(res) {
 
 async function streamDownload(d, res) {
     d.state = 'streaming';
+    d.res = res;
 
     let closed = false;
     res.on('close', () => { closed = true; });
@@ -995,6 +1045,10 @@ async function streamDownload(d, res) {
                 requestSize: DOWNLOAD_REQUEST_SIZE,
                 fileSize: part.rawSize, // o gramjs exige o tamanho original (BigInteger), não Number
             })) {
+                if (closed) break;
+
+                // Pausado: segura o envio (e a leitura do Telegram) até retomar.
+                while (d.paused && !closed) await waitWhilePaused(d, res);
                 if (closed) break;
 
                 let buf = Buffer.from(chunk);
@@ -1038,6 +1092,9 @@ async function streamDownload(d, res) {
         d.error = err.message || 'Erro durante o download';
         res.destroy();
     } finally {
+        clearTimeout(d.pauseTimer);
+        d.paused = false;
+        d.res = null;
         d.finishedAt = Date.now();
         d.parts = null;
         d.client = null;
@@ -1128,6 +1185,10 @@ app.post('/api/download/prepare', async (req, res) => {
             fileName: String(fileName || 'arquivo'),
             state: 'ready',
             error: null,
+            paused: false,
+            wake: null,
+            res: null,
+            pauseTimer: null,
         };
 
         res.json({
@@ -1158,11 +1219,47 @@ app.get('/api/download/status/:token', (req, res) => {
 
     res.json({
         success: true,
-        state: d.state,
+        state: d.paused && d.state === 'streaming' ? 'paused' : d.state,
         sent: d.sent,
         total: d.total,
         error: d.error,
     });
+});
+
+app.post('/api/download/pause', (req, res) => {
+    const { token, paused } = req.body || {};
+    const d = downloads[token];
+
+    if (!d) {
+        return res.status(404).json({
+            success: false,
+            message: 'Download não encontrado ou expirado.',
+        });
+    }
+
+    if (!setDownloadPaused(d, paused !== false)) {
+        return res.status(409).json({
+            success: false,
+            message: 'Este download não está em andamento.',
+        });
+    }
+
+    res.json({ success: true, paused: d.paused });
+});
+
+app.post('/api/download/cancel', (req, res) => {
+    const { token } = req.body || {};
+    const d = downloads[token];
+
+    if (!d) {
+        return res.status(404).json({
+            success: false,
+            message: 'Download não encontrado ou expirado.',
+        });
+    }
+
+    cancelDownload(d);
+    res.json({ success: true });
 });
 
 app.get('/api/download/:token', async (req, res) => {
