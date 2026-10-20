@@ -903,6 +903,14 @@ app.post('/api/upload/cancel', (req, res) => {
     });
 });
 
+process.on('uncaughtException', (err) => {
+    console.error('Erro não tratado (processo mantido):', err);
+});
+
+process.on('unhandledRejection', (err) => {
+    console.error('Promise rejeitada sem tratamento (processo mantido):', err);
+});
+
 // ---------------------------------------------------------------------------
 // INICIAR SERVIDOR
 // ---------------------------------------------------------------------------
