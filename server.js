@@ -16,8 +16,8 @@ app.use(express.json({ limit: '1mb' }));
 // CONFIGURAÇÃO
 // ---------------------------------------------------------------------------
 
-const CHUNK_SIZE = 12 * 1024 * 1024;
-const TG_PART_SIZE = 512 * 1024;
+const CHUNK_SIZE = 8 * 1024 * 1024;
+const TG_PART_SIZE = 1024 * 1024;
 const TG_WORKERS = 4;
 const MAX_PARTS_FREE = 4000;
 const MAX_PARTS_PREMIUM = 8000;
