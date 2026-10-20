@@ -993,7 +993,7 @@ async function streamDownload(d, res) {
             for await (const chunk of d.client.iterDownload({
                 file: part.media,
                 requestSize: DOWNLOAD_REQUEST_SIZE,
-                fileSize: part.size,
+                fileSize: part.rawSize, // o gramjs exige o tamanho original (BigInteger), não Number
             })) {
                 if (closed) break;
 
@@ -1112,7 +1112,7 @@ app.post('/api/download/prepare', async (req, res) => {
             }
 
             const size = Number(doc.size.toString());
-            parts.push({ media: m.media, size });
+            parts.push({ media: m.media, size, rawSize: doc.size });
             total += size;
         }
 
@@ -1197,6 +1197,7 @@ setInterval(() => {
         if (expiredIdle || expiredDone) delete downloads[token];
     }
 }, 10 * 60 * 1000);
+
 // ---------------------------------------------------------------------------
 // INICIAR SERVIDOR
 // ---------------------------------------------------------------------------
