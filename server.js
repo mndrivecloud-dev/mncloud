@@ -828,6 +828,86 @@ app.post('/api/delete-file', async (req, res) => {
     }
 });
 
+app.post('/api/check-messages', async (req, res) => {
+    try {
+        const {
+            phone,
+            channelId,
+            apiId,
+            apiHash,
+            sessionString,
+            messageIds,
+            userAgent
+        } = req.body;
+
+        if (!phone) {
+            return res.status(400).json({
+                success: false,
+                message: 'Número de telefone não informado.'
+            });
+        }
+
+        const ids = [...new Set(
+            (Array.isArray(messageIds) ? messageIds : [])
+                .map(id => Number(id))
+                .filter(id => Number.isSafeInteger(id) && id > 0)
+        )];
+
+        if (ids.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Nenhum ID válido de mensagem foi informado.'
+            });
+        }
+
+        const client = await getClient({
+            phone,
+            apiId,
+            apiHash,
+            sessionString,
+            userAgent
+        });
+
+        const target = await resolveTarget(client, channelId);
+
+        const missing = [];
+        const CHUNK = 100; // limite do Telegram por chamada
+
+        for (let i = 0; i < ids.length; i += CHUNK) {
+            const chunk = ids.slice(i, i + CHUNK);
+
+            // Se esta chamada falhar, o erro sobe para o catch (500):
+            // nunca marcamos como "apagado" sem ter certeza.
+            const msgs = await client.getMessages(target, { ids: chunk });
+
+            chunk.forEach((id, idx) => {
+                const m = Array.isArray(msgs) ? msgs[idx] : null;
+                const gone = !m || m.className === 'MessageEmpty';
+                if (gone) missing.push(id);
+            });
+        }
+
+        console.log('Verificação de mensagens no Telegram:', {
+            verificados: ids.length,
+            ausentes: missing
+        });
+
+        return res.json({
+            success: true,
+            checkedCount: ids.length,
+            missing
+        });
+
+    } catch (err) {
+        console.error('ERRO AO VERIFICAR MENSAGENS DO TELEGRAM:', err);
+
+        return res.status(err.status || 500).json({
+            success: false,
+            message: err.message || 'Erro interno ao verificar mensagens.'
+        });
+    }
+});
+
 // ---------------------------------------------------------------------------
 // 8. CANCELAR UPLOAD IMEDIATAMENTE
 // ---------------------------------------------------------------------------
