@@ -941,6 +941,263 @@ app.post('/api/upload/cancel', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// 9. DOWNLOAD DE ARQUIVO (único ou dividido em partes)
+// Fluxo: o site chama /api/download/prepare (com as credenciais), recebe um
+// token de uso único e abre /api/download/:token, que transmite as partes do
+// Telegram em sequência, como UM só arquivo, sem guardar nada em disco/memória.
+// O site acompanha o fim do envio em /api/download/status/:token.
+// ---------------------------------------------------------------------------
+
+const downloads = {};
+const DOWNLOAD_REQUEST_SIZE = 1024 * 1024; // 1 MiB por requisição ao Telegram
+
+function contentDisposition(name) {
+    const clean = String(name || 'arquivo').replace(/[\r\n"\\/]/g, '_');
+    const ascii = clean.replace(/[^\x20-\x7e]/g, '_');
+    const encoded = encodeURIComponent(clean).replace(
+        /['()*]/g,
+        (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase()
+    );
+    return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+
+function waitDrainOrClose(res) {
+    return new Promise((resolve) => {
+        const done = () => {
+            res.off('drain', done);
+            res.off('close', done);
+            resolve();
+        };
+        res.once('drain', done);
+        res.once('close', done);
+    });
+}
+
+async function streamDownload(d, res) {
+    d.state = 'streaming';
+
+    let closed = false;
+    res.on('close', () => { closed = true; });
+
+    try {
+        res.writeHead(200, {
+            'Content-Type': 'application/octet-stream',
+            'Content-Disposition': contentDisposition(d.fileName),
+            'Content-Length': d.total,
+            'Cache-Control': 'no-store',
+        });
+
+        for (const part of d.parts) {
+            let partSent = 0;
+
+            for await (const chunk of d.client.iterDownload({
+                file: part.media,
+                requestSize: DOWNLOAD_REQUEST_SIZE,
+                fileSize: part.size,
+            })) {
+                if (closed) break;
+
+                let buf = Buffer.from(chunk);
+                const remaining = part.size - partSent;
+
+                if (buf.length > remaining) buf = buf.subarray(0, remaining);
+                if (buf.length === 0) break;
+
+                partSent += buf.length;
+                d.sent += buf.length;
+
+                if (!res.write(buf)) await waitDrainOrClose(res);
+
+                if (closed || partSent >= part.size) break;
+            }
+
+            if (closed) break;
+
+            if (partSent !== part.size) {
+                throw new Error(
+                    `Parte incompleta recebida do Telegram (${partSent}/${part.size} bytes).`
+                );
+            }
+        }
+
+        if (closed) {
+            d.state = 'aborted';
+            return;
+        }
+
+        await new Promise((resolve) => {
+            res.once('finish', resolve);
+            res.once('close', resolve);
+            res.end();
+        });
+
+        d.state = res.writableFinished ? 'done' : 'aborted';
+    } catch (err) {
+        console.error('ERRO NO DOWNLOAD:', err);
+        d.state = 'error';
+        d.error = err.message || 'Erro durante o download';
+        res.destroy();
+    } finally {
+        d.finishedAt = Date.now();
+        d.parts = null;
+        d.client = null;
+    }
+}
+
+app.post('/api/download/prepare', async (req, res) => {
+    try {
+        const {
+            phone,
+            channelId,
+            apiId,
+            apiHash,
+            sessionString,
+            messageIds,
+            fileName,
+            userAgent,
+        } = req.body;
+
+        if (!phone) {
+            return res.status(400).json({
+                success: false,
+                message: 'Número de telefone não informado.',
+            });
+        }
+
+        const ids = [...new Set(
+            (Array.isArray(messageIds) ? messageIds : [])
+                .map((id) => Number(id))
+                .filter((id) => Number.isSafeInteger(id) && id > 0)
+        )];
+
+        if (ids.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Nenhum ID válido de mensagem foi informado.',
+            });
+        }
+
+        const client = await getClient({
+            phone,
+            apiId,
+            apiHash,
+            sessionString,
+            userAgent,
+        });
+
+        const target = await resolveTarget(client, channelId);
+
+        // Busca as mensagens na MESMA ordem dos IDs (Parte 1, 2, 3...).
+        const messages = [];
+        for (let i = 0; i < ids.length; i += 100) {
+            const chunk = ids.slice(i, i + 100);
+            const msgs = await client.getMessages(target, { ids: chunk });
+            chunk.forEach((id, idx) => {
+                messages.push(Array.isArray(msgs) ? msgs[idx] : null);
+            });
+        }
+
+        const parts = [];
+        let total = 0;
+
+        for (let i = 0; i < messages.length; i++) {
+            const m = messages[i];
+            const doc = m && m.media && m.media.document;
+
+            if (!doc) {
+                return res.status(404).json({
+                    success: false,
+                    message: `A parte ${i + 1} de ${messages.length} não foi encontrada no Telegram.`,
+                });
+            }
+
+            const size = Number(doc.size.toString());
+            parts.push({ media: m.media, size });
+            total += size;
+        }
+
+        const token = crypto.randomBytes(24).toString('hex');
+
+        downloads[token] = {
+            createdAt: Date.now(),
+            finishedAt: null,
+            client,
+            parts,
+            total,
+            sent: 0,
+            fileName: String(fileName || 'arquivo'),
+            state: 'ready',
+            error: null,
+        };
+
+        res.json({
+            success: true,
+            token,
+            total,
+            partCount: parts.length,
+        });
+    } catch (err) {
+        console.error('ERRO AO PREPARAR DOWNLOAD:', err);
+
+        res.status(err.status || 500).json({
+            success: false,
+            message: err.message || 'Erro ao preparar o download.',
+        });
+    }
+});
+
+app.get('/api/download/status/:token', (req, res) => {
+    const d = downloads[req.params.token];
+
+    if (!d) {
+        return res.status(404).json({
+            success: false,
+            message: 'Download não encontrado ou expirado.',
+        });
+    }
+
+    res.json({
+        success: true,
+        state: d.state,
+        sent: d.sent,
+        total: d.total,
+        error: d.error,
+    });
+});
+
+app.get('/api/download/:token', async (req, res) => {
+    const d = downloads[req.params.token];
+
+    if (!d) {
+        return res.status(404).json({
+            success: false,
+            message: 'Download não encontrado ou expirado.',
+        });
+    }
+
+    if (d.state !== 'ready') {
+        return res.status(409).json({
+            success: false,
+            message: 'Este link de download já foi usado. Clique em Baixar novamente.',
+        });
+    }
+
+    await streamDownload(d, res);
+});
+
+// Limpa tokens antigos: não usados há 1h ou já finalizados há 5 min.
+setInterval(() => {
+    const now = Date.now();
+
+    for (const token of Object.keys(downloads)) {
+        const d = downloads[token];
+        const expiredIdle = !d.finishedAt && now - d.createdAt > 60 * 60 * 1000;
+        const expiredDone = d.finishedAt && now - d.finishedAt > 5 * 60 * 1000;
+
+        if (expiredIdle || expiredDone) delete downloads[token];
+    }
+}, 10 * 60 * 1000);
+// ---------------------------------------------------------------------------
 // INICIAR SERVIDOR
 // ---------------------------------------------------------------------------
 
