@@ -37,7 +37,7 @@ function deviceFor(userAgent) {
     let systemVersion = 'Windows 10 x64';
 
     if (/Windows/i.test(ua)) systemVersion = 'Windows 10 x64';
-    else if (/Android/i.test(ua)) systemVersion = 'menozin';
+    else if (/Android/i.test(ua)) systemVersion = 'MNDRIVE';
     else if (/iPhone|iPad|iOS/i.test(ua)) systemVersion = 'iOS';
     else if (/Mac OS X|Macintosh/i.test(ua)) systemVersion = 'macOS';
     else if (/Linux|X11/i.test(ua)) systemVersion = 'Linux';
