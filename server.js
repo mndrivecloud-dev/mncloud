@@ -32,19 +32,9 @@ const DEFAULT_UA =
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 function deviceFor(userAgent) {
-    const ua = String(userAgent || DEFAULT_UA);
-
-    let systemVersion = 'Windows 10 x64';
-
-    if (/Windows/i.test(ua)) systemVersion = 'Windows 10 x64';
-    else if (/Android/i.test(ua)) systemVersion = 'MNDRIVE';
-    else if (/iPhone|iPad|iOS/i.test(ua)) systemVersion = 'iOS';
-    else if (/Mac OS X|Macintosh/i.test(ua)) systemVersion = 'macOS';
-    else if (/Linux|X11/i.test(ua)) systemVersion = 'Linux';
-
     return {
         deviceModel: 'Browser',
-        systemVersion,
+        systemVersion: 'Windows 10 x64',
         appVersion: '1.0',
         langCode: 'pt-br',
         systemLangCode: 'pt-br',
