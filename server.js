@@ -17,8 +17,8 @@ app.use(express.json({ limit: '1mb' }));
 // ---------------------------------------------------------------------------
 
 const CHUNK_SIZE = 8 * 1024 * 1024;
-const TG_PART_SIZE = 1024 * 1024;
-const TG_WORKERS = 8; // se aparecer FLOOD_WAIT, volte para 6 ou 4
+const TG_PART_SIZE = 512 * 1024;
+const TG_WORKERS = 4;
 const MAX_PARTS_FREE = 4000;
 const MAX_PARTS_PREMIUM = 8000;
 
@@ -126,29 +126,10 @@ async function resolveTarget(client, channelId) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Espera até que os blocos que cobrem o intervalo [startAbs, endAbs)
-// do arquivo original tenham sido recebidos do navegador.
-async function waitForBytes(u, startAbs, endAbs) {
-    const first = Math.floor(startAbs / CHUNK_SIZE);
-    const last = Math.floor((endAbs - 1) / CHUNK_SIZE);
-
-    for (let c = first; c <= last; c++) {
-        while (!u.received.has(c)) {
-            if (!uploads[u.id] || u.state === 'canceled') {
-                throw new Error('Upload cancelado.');
-            }
-
-            await sleep(150);
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // ENVIO DE UM ARQUIVO OU DE UMA PARTE AO TELEGRAM
 // Lê diretamente do disco, sem carregar o arquivo inteiro na memória.
 // startOffset indica onde começa a parte dentro do arquivo original.
-// beforeRead (opcional) é chamado antes de ler cada pedaço, permitindo
-// aguardar os bytes chegarem do navegador (envio em paralelo).
 // ---------------------------------------------------------------------------
 
 async function uploadFileToTelegram(
@@ -157,8 +138,7 @@ async function uploadFileToTelegram(
     fileName,
     size,
     onProgress,
-    startOffset = 0,
-    beforeRead = null
+    startOffset = 0
 ) {
     const me = await client.getMe();
     const totalParts = Math.ceil(size / TG_PART_SIZE);
@@ -198,8 +178,6 @@ async function uploadFileToTelegram(
                 TG_PART_SIZE,
                 size - part * TG_PART_SIZE
             );
-
-            if (beforeRead) await beforeRead(offset, offset + length);
 
             const { bytesRead } = await fh.read(
                 buf,
@@ -280,109 +258,6 @@ setInterval(() => {
         }
     }
 }, 30 * 60 * 1000);
-
-// ---------------------------------------------------------------------------
-// ENVIO AO TELEGRAM (roda em paralelo ao recebimento dos blocos)
-// Iniciado no /api/upload/init. Cada pedaço só é lido quando os blocos
-// correspondentes já chegaram do navegador.
-// ---------------------------------------------------------------------------
-
-async function sendToTelegram(u) {
-    try {
-        const client = await getClient(u);
-        const target = await resolveTarget(client, u.channelId);
-
-        // Arquivo de até 2 GiB: um documento.
-        // Arquivo maior que 2 GiB: documentos numerados.
-        const partSize = u.fileSize > SPLIT_THRESHOLD
-            ? MAX_UPLOAD_PART_SIZE
-            : u.fileSize;
-
-        const totalFileParts = Math.ceil(u.fileSize / partSize);
-
-        const ext = path.extname(u.fileName);
-        const baseName = path.basename(u.fileName, ext);
-
-        const sentMessages = [];
-
-        for (let i = 0; i < totalFileParts; i++) {
-            const startOffset = i * partSize;
-
-            const currentSize = Math.min(
-                partSize,
-                u.fileSize - startOffset
-            );
-
-            const partName = totalFileParts > 1
-                ? `${baseName} - Parte ${i + 1}${ext}`
-                : u.fileName;
-
-            console.log(
-                `Enviando ${partName} (${i + 1}/${totalFileParts})`
-            );
-
-            const inputFile = await uploadFileToTelegram(
-                client,
-                u.path,
-                partName,
-                currentSize,
-                (p) => {
-                    u.progress = (i + p) / totalFileParts;
-                },
-                startOffset,
-                (from, to) => waitForBytes(u, from, to)
-            );
-
-            const message = await client.sendFile(target, {
-                file: inputFile,
-                forceDocument: true,
-
-                caption: totalFileParts > 1
-                    ? `📦 ${u.fileName} — Parte ${i + 1} de ${totalFileParts}`
-                    : `📦 MNDRIVE UPLOAD: ${u.fileName}`,
-
-                attributes: [
-                    new Api.DocumentAttributeFilename({
-                        fileName: partName,
-                    }),
-                ],
-            });
-
-            sentMessages.push(message);
-
-            u.progress = (i + 1) / totalFileParts;
-            u.messageIds = sentMessages.map((m) => m.id);
-        }
-
-        u.messageId = sentMessages[0].id;
-        u.messageIds = sentMessages.map((m) => m.id);
-
-        u.fileId =
-            sentMessages[0].media &&
-            sentMessages[0].media.document
-                ? sentMessages[0].media.document.id.toString()
-                : 'tg_file_' + Date.now();
-
-        u.state = 'done';
-
-        console.log(
-            `Upload concluído: ${u.fileName} (${totalFileParts} parte(s))`
-        );
-    } catch (err) {
-        console.error('ERRO NO ENVIO AO TELEGRAM:', err);
-
-        if (err.errorMessage === 'AUTH_KEY_UNREGISTERED') {
-            delete activeSessions[u.phone];
-        }
-
-        if (u.state !== 'canceled') {
-            u.state = 'error';
-            u.error = err.message || 'Erro ao enviar ao Telegram';
-        }
-    } finally {
-        removeTemp(u);
-    }
-}
 
 // ---------------------------------------------------------------------------
 // 1. ENVIAR CÓDIGO DE VERIFICAÇÃO
@@ -533,7 +408,6 @@ app.post('/api/auth/sign-in', async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // 3. INICIAR UPLOAD
-// Já dispara o envio ao Telegram, que acompanha a chegada dos blocos.
 // ---------------------------------------------------------------------------
 
 app.post('/api/upload/init', (req, res) => {
@@ -570,7 +444,6 @@ app.post('/api/upload/init', (req, res) => {
         fs.closeSync(fs.openSync(tmpPath, 'w'));
 
         uploads[uploadId] = {
-            id: uploadId,
             createdAt: Date.now(),
             path: tmpPath,
             phone,
@@ -584,12 +457,8 @@ app.post('/api/upload/init', (req, res) => {
             totalChunks: Math.ceil(Number(fileSize) / CHUNK_SIZE),
             received: new Set(),
             state: 'receiving',
-            finishing: false,
             progress: 0,
         };
-
-        // Começa a enviar ao Telegram já durante o recebimento (sem await).
-        sendToTelegram(uploads[uploadId]);
 
         res.json({
             success: true,
@@ -682,7 +551,6 @@ app.post(
                 await fh.close();
             }
 
-            // Só marca como recebido depois de gravar no disco.
             u.received.add(index);
 
             res.json({
@@ -702,9 +570,7 @@ app.post(
 );
 
 // ---------------------------------------------------------------------------
-// 5. FINALIZAR UPLOAD
-// O envio ao Telegram já está em andamento desde o init; aqui só
-// confirmamos que todos os blocos chegaram.
+// 5. FINALIZAR UPLOAD E ENVIAR AO TELEGRAM
 // ---------------------------------------------------------------------------
 
 app.post('/api/upload/finish', (req, res) => {
@@ -724,12 +590,113 @@ app.post('/api/upload/finish', (req, res) => {
         });
     }
 
-    u.finishing = true;
+    if (u.state !== 'receiving') {
+        return res.json({
+            success: true,
+            state: u.state,
+        });
+    }
+
+    u.state = 'sending';
 
     res.status(202).json({
         success: true,
         state: 'sending',
     });
+
+    (async () => {
+        try {
+            const client = await getClient(u);
+            const target = await resolveTarget(client, u.channelId);
+
+            // Arquivo de até 2 GiB: um documento.
+            // Arquivo maior que 2 GiB: documentos numerados.
+            const partSize = u.fileSize > SPLIT_THRESHOLD
+                ? MAX_UPLOAD_PART_SIZE
+                : u.fileSize;
+
+            const totalFileParts = Math.ceil(u.fileSize / partSize);
+
+            const ext = path.extname(u.fileName);
+            const baseName = path.basename(u.fileName, ext);
+
+            const sentMessages = [];
+
+            for (let i = 0; i < totalFileParts; i++) {
+                const startOffset = i * partSize;
+
+                const currentSize = Math.min(
+                    partSize,
+                    u.fileSize - startOffset
+                );
+
+                const partName = totalFileParts > 1
+                    ? `${baseName} - Parte ${i + 1}${ext}`
+                    : u.fileName;
+
+                console.log(
+                    `Enviando ${partName} (${i + 1}/${totalFileParts})`
+                );
+
+                const inputFile = await uploadFileToTelegram(
+                    client,
+                    u.path,
+                    partName,
+                    currentSize,
+                    (p) => {
+                        u.progress = (i + p) / totalFileParts;
+                    },
+                    startOffset
+                );
+
+                const message = await client.sendFile(target, {
+                    file: inputFile,
+                    forceDocument: true,
+
+                    caption: totalFileParts > 1
+                        ? `📦 ${u.fileName} — Parte ${i + 1} de ${totalFileParts}`
+                        : `📦 MNDRIVE UPLOAD: ${u.fileName}`,
+
+                    attributes: [
+                        new Api.DocumentAttributeFilename({
+                            fileName: partName,
+                        }),
+                    ],
+                });
+
+                sentMessages.push(message);
+
+                u.progress = (i + 1) / totalFileParts;
+                u.messageIds = sentMessages.map((m) => m.id);
+            }
+
+            u.messageId = sentMessages[0].id;
+            u.messageIds = sentMessages.map((m) => m.id);
+
+            u.fileId =
+                sentMessages[0].media &&
+                sentMessages[0].media.document
+                    ? sentMessages[0].media.document.id.toString()
+                    : 'tg_file_' + Date.now();
+
+            u.state = 'done';
+
+            console.log(
+                `Upload concluído: ${u.fileName} (${totalFileParts} parte(s))`
+            );
+        } catch (err) {
+            console.error('ERRO NO ENVIO AO TELEGRAM:', err);
+
+            if (err.errorMessage === 'AUTH_KEY_UNREGISTERED') {
+                delete activeSessions[u.phone];
+            }
+
+            u.state = 'error';
+            u.error = err.message || 'Erro ao enviar ao Telegram';
+        } finally {
+            removeTemp(u);
+        }
+    })();
 });
 
 // ---------------------------------------------------------------------------
@@ -748,7 +715,7 @@ app.get('/api/upload/status/:uploadId', (req, res) => {
 
     res.json({
         success: true,
-        state: (u.state === 'receiving' && u.finishing) ? 'sending' : u.state,
+        state: u.state,
         progress: u.progress,
         messageId: u.messageId,
         messageIds: u.messageIds,
@@ -901,14 +868,6 @@ app.post('/api/upload/cancel', (req, res) => {
         success: true,
         message: 'Upload cancelado com sucesso.',
     });
-});
-
-process.on('uncaughtException', (err) => {
-    console.error('Erro não tratado (processo mantido):', err);
-});
-
-process.on('unhandledRejection', (err) => {
-    console.error('Promise rejeitada sem tratamento (processo mantido):', err);
 });
 
 // ---------------------------------------------------------------------------
