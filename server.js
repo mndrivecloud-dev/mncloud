@@ -410,6 +410,7 @@ app.post('/api/upload/init', (req, res) => {
             sessionString,
             fileName,
             fileSize,
+            folderName,
             userAgent,
         } = req.body;
 
@@ -443,6 +444,9 @@ app.post('/api/upload/init', (req, res) => {
             sessionString,
             userAgent,
             fileName: String(fileName),
+            folderName: folderName
+                ? String(folderName).replace(/[\r\n]+/g, ' ').slice(0, 200)
+                : null,
             fileSize: Number(fileSize),
             totalChunks: Math.ceil(Number(fileSize) / CHUNK_SIZE),
             received: new Set(),
@@ -610,6 +614,11 @@ app.post('/api/upload/finish', (req, res) => {
             const ext = path.extname(u.fileName);
             const baseName = path.basename(u.fileName, ext);
 
+            // Sufixo da legenda quando o arquivo vem de um upload de pasta
+            const folderSuffix = u.folderName
+                ? ` (pasta "${u.folderName}")`
+                : '';
+
             const sentMessages = [];
 
             for (let i = 0; i < totalFileParts; i++) {
@@ -644,8 +653,8 @@ app.post('/api/upload/finish', (req, res) => {
                     forceDocument: true,
 
                     caption: totalFileParts > 1
-                        ? `📦 ${u.fileName} — Parte ${i + 1} de ${totalFileParts}`
-                        : `📦 MNDRIVE UPLOAD: ${u.fileName}`,
+                        ? `📦 ${u.fileName} — Parte ${i + 1} de ${totalFileParts}${folderSuffix}`
+                        : `📦 MNDRIVE UPLOAD: ${u.fileName}${folderSuffix}`,
 
                     attributes: [
                         new Api.DocumentAttributeFilename({
